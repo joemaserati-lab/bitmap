@@ -17,9 +17,21 @@
   </section>
   <aside class="controls-panel">
     <div class="controls-top">
-      <label class="file-btn mobile-file"> <input id="fileGallery" type="file" accept="image/*"> GALLERY </label>
-      <label class="file-btn mobile-file"> <input id="fileCamera" type="file" accept="image/*" capture="environment"> CAMERA </label>
-      <div id="dropzone" class="dropzone">DRAG HERE</div>
+      <label class="file-btn primary-file">
+        <input id="fileGallery" type="file" accept="image/*">
+        CARICA FILE
+      </label>
+      <label class="file-btn mobile-only">
+        <input id="fileCamera" type="file" accept="image/*" capture="environment">
+        CAMERA
+      </label>
+      <div id="dropzone" class="dropzone" tabindex="0">TRASCINA QUI O CLICCA PER CARICARE</div>
+      <div class="upload-feedback" aria-live="polite">
+        <div id="uploadMessage" class="upload-message">NESSUN FILE CARICATO</div>
+        <div id="uploadProgressWrapper" class="upload-progress" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="uploadProgressBar" class="progress-bar"></div>
+        </div>
+      </div>
     </div>
     <div class="controls-body">
       <div class="field"><label>PIXEL SIZE</label><div class="slider"><input id="pixelSize" type="range" min="2" max="200" step="1" value="10"><input id="pixelSizeNum" class="num" type="number" min="2" max="200" step="1" value="10"></div></div>
