@@ -41,8 +41,10 @@ const state = {
   pendingJobs: new Map(),
   currentJobId: 0,
   lastResult: null,
+  lastResultId: 0,
   lastPreview: null,
   lastSVG: '',
+  lastSVGJob: 0,
   lastSize: {width: 0, height: 0},
   lastScale: 1,
   asciiCache: null,
@@ -357,9 +359,12 @@ function setSourceCanvas(canvas, name){
   state.sourceName = name;
   state.sourceWidth = canvas.width;
   state.sourceHeight = canvas.height;
+  state.lastResult = null;
+  state.lastResultId = 0;
   state.asciiCache = null;
   state.lastPreview = null;
   state.lastSVG = '';
+  state.lastSVGJob = 0;
   state.lastSize = {width: 0, height: 0};
   state.lastScale = 1;
   if(state.offscreenSupported){
@@ -537,13 +542,17 @@ async function generate(){
   const result = await requestWorkerProcess(payload);
   if(!result || result.jobId !== jobId) return;
   state.lastResult = {options, data: result};
-  const previewData = buildSVGFromResult(result, options);
+  state.lastResultId = jobId;
+  state.lastSVG = '';
+  state.lastSVGJob = 0;
+  const previewData = buildPreviewData(result, options);
   state.lastPreview = previewData;
-  state.lastSVG = previewData.svgString;
-  state.lastSize = {width: previewData.width, height: previewData.height};
+  const previewWidth = previewData ? previewData.width : 0;
+  const previewHeight = previewData ? previewData.height : 0;
+  state.lastSize = {width: previewWidth, height: previewHeight};
   state.lastScale = options.scale;
   renderPreview(previewData, options.scale);
-  updateMeta(state.lastSize.width, state.lastSize.height);
+  updateMeta(previewWidth, previewHeight);
   updateExportButtons();
 }
 
@@ -564,23 +573,42 @@ function requestWorkerProcess(message){
   });
 }
 
-function buildSVGFromResult(result, options){
+function buildPreviewData(result, options){
   if(!result){
     state.asciiCache = null;
-    return {svgString:'', svgElement:null, width:0, height:0, mode:null};
+    return null;
   }
-  const {gridWidth, gridHeight, mode, mask, tonal, ascii} = result;
-  const tile = options.px;
+  const {gridWidth, gridHeight, mode, mask} = result;
+  const tile = Math.max(1, options.px);
   const width = Math.round(gridWidth * tile);
   const height = Math.round(gridHeight * tile);
-  if(mode && mode.startsWith('ascii')){
+  const previewMode = mode || options.mode || 'none';
+  if(previewMode && previewMode.startsWith('ascii')){
     const svgElement = getAsciiSVGElement(result, options);
-    const svgString = buildASCIISVGString(ascii, tonal, gridWidth, gridHeight, tile, options.bg, options.fg, mode);
-    return {svgString, svgElement, width, height, mode};
+    return {
+      type: 'ascii',
+      mode: previewMode,
+      width,
+      height,
+      gridWidth,
+      gridHeight,
+      tile,
+      node: svgElement
+    };
   }
   state.asciiCache = null;
-  const svgString = buildMaskSVGString(mask, gridWidth, gridHeight, tile, options.bg, options.fg);
-  return {svgString, svgElement:null, width, height, mode};
+  return {
+    type: 'mask',
+    mode: previewMode,
+    width,
+    height,
+    gridWidth,
+    gridHeight,
+    tile,
+    mask,
+    bg: options.bg,
+    fg: options.fg
+  };
 }
 
 function buildMaskSVGString(mask, width, height, tile, bg, fg){
@@ -589,15 +617,24 @@ function buildMaskSVGString(mask, width, height, tile, bg, fg){
   const svgH = Math.round(height*tile);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
   if(bg) svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
-  svg += `<g fill="${fg}">`;
+  svg += `<path fill="${fg}" d="`;
   for(let y=0;y<height;y++){
-    for(let x=0;x<width;x++){
-      if(mask[y*width+x]){
-        svg += `<rect x="${x*tile}" y="${y*tile}" width="${tile}" height="${tile}"/>`;
+    let runStart = -1;
+    const rowOffset = y*width;
+    for(let x=0;x<=width;x++){
+      const value = x<width ? mask[rowOffset+x] : 0;
+      if(value && runStart<0){
+        runStart = x;
+      }else if((!value || x===width) && runStart>=0){
+        const rectWidth = (x-runStart)*tile;
+        const rectX = runStart*tile;
+        const rectY = y*tile;
+        svg += `M${rectX} ${rectY}h${rectWidth}v${tile}h-${rectWidth}z`;
+        runStart = -1;
       }
     }
   }
-  svg += '</g></svg>';
+  svg += '"/></svg>';
   return svg;
 }
 
@@ -689,11 +726,19 @@ function getAsciiSVGElement(result, options){
   return cache.svg;
 }
 
+function buildExportSVG(result, options){
+  if(!result) return '';
+  const tile = Math.max(1, options.px);
+  if(result.mode && result.mode.startsWith('ascii')){
+    return buildASCIISVGString(result.ascii, result.tonal, result.gridWidth, result.gridHeight, tile, options.bg, options.fg, result.mode);
+  }
+  return buildMaskSVGString(result.mask, result.gridWidth, result.gridHeight, tile, options.bg, options.fg);
+}
 
 function renderPreview(previewData, scale){
   if(!preview) return;
   preview.innerHTML = '';
-  if(!previewData || !previewData.svgString){
+  if(!previewData){
     if(meta) meta.textContent = '';
     return;
   }
@@ -702,23 +747,57 @@ function renderPreview(previewData, scale){
   const dims = computePreviewDimensions(previewData.width, previewData.height, scale);
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
-  let node = null;
-  if(previewData.svgElement){
-    node = previewData.svgElement;
-  }else{
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = previewData.svgString;
-    node = wrapper.firstElementChild;
-  }
-  if(node){
+  if(previewData.type === 'ascii' && previewData.node){
+    const node = previewData.node;
     node.setAttribute('width','100%');
     node.setAttribute('height','100%');
     node.setAttribute('preserveAspectRatio','xMidYMid meet');
     node.style.width = '100%';
     node.style.height = '100%';
     frame.appendChild(node);
+  }else if(previewData.type === 'mask'){
+    const canvas = document.createElement('canvas');
+    canvas.width = previewData.width;
+    canvas.height = previewData.height;
+    drawMaskPreview(canvas, previewData);
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.imageRendering = 'pixelated';
+    frame.appendChild(canvas);
   }
   preview.appendChild(frame);
+}
+
+function drawMaskPreview(canvas, data){
+  const ctx = canvas.getContext('2d', {alpha: !!data.bg && data.bg !== 'transparent'});
+  if(!ctx) return;
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }else{
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  if(!data.mask) return;
+  ctx.fillStyle = data.fg || '#000000';
+  const {gridWidth, gridHeight, tile, mask} = data;
+  for(let y=0;y<gridHeight;y++){
+    let runStart = -1;
+    const rowOffset = y*gridWidth;
+    for(let x=0;x<=gridWidth;x++){
+      const value = x<gridWidth ? mask[rowOffset+x] : 0;
+      if(value && runStart<0){
+        runStart = x;
+      }else if((!value || x===gridWidth) && runStart>=0){
+        const runLength = x - runStart;
+        if(runLength>0){
+          ctx.fillRect(runStart*tile, y*tile, runLength*tile, tile);
+        }
+        runStart = -1;
+      }
+    }
+  }
 }
 
 function schedulePreviewRefresh(){
@@ -777,13 +856,13 @@ function updateMeta(width, height){
 }
 
 function updateExportButtons(){
-  const hasSVG = !!(state.lastPreview && state.lastPreview.svgString);
+  const hasResult = !!(state.lastResult && state.lastResult.data);
   const jobActive = renderBusy || state.pendingJobs.size > 0;
   ['dlSVG','dlPNG','dlJPG'].forEach((id) => {
     const btn = $(id);
     if(!btn) return;
     const busy = btn.dataset.busy === 'true';
-    const disabled = busy || !hasSVG || jobActive;
+    const disabled = busy || !hasResult || jobActive;
     btn.disabled = disabled;
     btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     if(busy) btn.setAttribute('aria-busy','true');
@@ -822,19 +901,19 @@ function wait(ms){
 }
 
 async function downloadSVG(){
-  const previewData = ensurePreviewData();
-  if(!previewData || !previewData.svgString) return;
-  const blob = new Blob([previewData.svgString], {type:'image/svg+xml'});
+  const svgString = ensureSVGString();
+  if(!svgString) return;
+  const blob = new Blob([svgString], {type:'image/svg+xml'});
   triggerDownload(blob, 'bitmap.svg');
 }
 
 async function downloadRaster(format){
-  const previewData = ensurePreviewData();
-  if(!previewData || !previewData.svgString) return;
+  const svgString = ensureSVGString();
+  if(!svgString) return;
   const dims = getExportDimensions();
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
-  const canvas = await rasterizeSVGToCanvas(previewData.svgString, dims.width, dims.height, background);
+  const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
@@ -865,19 +944,17 @@ function getExportDimensions(){
   return {width: outW, height: outH};
 }
 
-function ensurePreviewData(){
-  if(state.lastPreview && state.lastPreview.svgString){
-    return state.lastPreview;
+function ensureSVGString(){
+  if(!state.lastResult || !state.lastResult.data){
+    return '';
   }
-  if(state.lastResult && state.lastResult.data){
-    const previewData = buildSVGFromResult(state.lastResult.data, state.lastResult.options);
-    state.lastPreview = previewData;
-    state.lastSVG = previewData.svgString;
-    state.lastSize = {width: previewData.width, height: previewData.height};
-    state.lastScale = state.lastResult.options ? state.lastResult.options.scale : state.lastScale;
-    return previewData;
+  if(state.lastSVG && state.lastSVGJob === state.lastResultId){
+    return state.lastSVG;
   }
-  return null;
+  const svgString = buildExportSVG(state.lastResult.data, state.lastResult.options);
+  state.lastSVG = svgString;
+  state.lastSVGJob = state.lastResultId;
+  return svgString;
 }
 
 function getSelectedDPI(){
