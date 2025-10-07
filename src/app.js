@@ -7,7 +7,7 @@ const progressWrap = $('uploadProgressWrapper');
 const progressBar = $('uploadProgressBar');
 
 const CONTROL_IDS = [
-  'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum',
+  'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
   'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
   'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
   'dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR',
@@ -149,6 +149,7 @@ function bindControls(){
     ['threshold','thresholdNum'],
     ['blur','blurNum'],
     ['grain','grainNum'],
+    ['glow','glowNum'],
     ['blackPoint','blackPointNum'],
     ['whitePoint','whitePointNum'],
     ['gammaVal','gammaValNum'],
@@ -774,6 +775,7 @@ function collectRenderOptions(){
   const thr = clampInt(controls.threshold.value||180, 0, 255);
   const blurPx = Math.max(0, parseFloat(controls.blur.value||'0'));
   const grain = Math.max(0, Math.min(100, parseInt(controls.grain.value||'0',10)));
+  const glow = Math.max(0, Math.min(100, parseInt(controls.glow.value||'0',10)));
   const bp = clampInt(controls.blackPoint.value||0, 0, 255);
   const wp = clampInt(controls.whitePoint.value||255, 1, 255);
   const gam = Math.max(0.1, Math.min(3, parseFloat(controls.gammaVal.value||'1')));
@@ -787,7 +789,7 @@ function collectRenderOptions(){
   const fg = controls.fg.value||'#000000';
   const scaleVal = parseFloat(controls.scale.value||'1');
   const scale = Number.isFinite(scaleVal) && scaleVal>0 ? scaleVal : 1;
-  return {px, thr, blurPx, grain, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale};
+  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale};
 }
 
 function buildWorkerOptions(options){
@@ -925,9 +927,9 @@ function buildPreviewData(result, options){
     return null;
   }
   const {gridWidth, gridHeight, mode, mask} = result;
-  const tile = Math.max(1, options.px);
-  const width = Math.round(gridWidth * tile);
-  const height = Math.round(gridHeight * tile);
+  const tile = result.tile != null ? result.tile : Math.max(1, options.px);
+  const width = Math.round(result.outputWidth || (gridWidth * tile));
+  const height = Math.round(result.outputHeight || (gridHeight * tile));
   const previewMode = mode || options.mode || 'none';
   return {
     type: 'mask',
@@ -939,7 +941,8 @@ function buildPreviewData(result, options){
     tile,
     mask,
     bg: options.bg,
-    fg: options.fg
+    fg: options.fg,
+    glow: options.glow
   };
 }
 
@@ -947,14 +950,14 @@ function buildAnimationPreviewData(results, options, durations, fps){
   if(!results || !results.length){
     return null;
   }
-  const tile = Math.max(1, options.px);
+  const tile = results[0].tile != null ? results[0].tile : Math.max(1, options.px);
   const first = results[0];
-  const width = Math.round(first.gridWidth * tile);
-  const height = Math.round(first.gridHeight * tile);
+  const width = Math.round(first.outputWidth || (first.gridWidth * tile));
+  const height = Math.round(first.outputHeight || (first.gridHeight * tile));
   const frames = results.map((res) => ({
     gridWidth: res.gridWidth,
     gridHeight: res.gridHeight,
-    tile,
+    tile: res.tile != null ? res.tile : tile,
     mask: res.mask
   }));
   const effectiveDurations = durations.slice(0, frames.length);
@@ -968,41 +971,57 @@ function buildAnimationPreviewData(results, options, durations, fps){
     durations: effectiveDurations,
     bg: options.bg,
     fg: options.fg,
+    glow: options.glow,
     fps: derivedFPS
   };
 }
 
-function buildMaskSVGString(mask, width, height, tile, bg, fg){
+function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}){
   if(!mask) return '';
-  const svgW = Math.round(width*tile);
-  const svgH = Math.round(height*tile);
+  const unit = tile || 1;
+  const svgW = Math.round(width*unit);
+  const svgH = Math.round(height*unit);
+  const pathData = buildMaskPathData(mask, width, height, unit);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
   if(bg) svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
-  svg += `<path fill="${fg}" d="`;
-  for(let y=0;y<height;y++){
-    let runStart = -1;
-    const rowOffset = y*width;
-    for(let x=0;x<=width;x++){
-      const value = x<width ? mask[rowOffset+x] : 0;
-      if(value && runStart<0){
-        runStart = x;
-      }else if((!value || x===width) && runStart>=0){
-        const rectWidth = (x-runStart)*tile;
-        const rectX = runStart*tile;
-        const rectY = y*tile;
-        svg += `M${rectX} ${rectY}h${rectWidth}v${tile}h-${rectWidth}z`;
-        runStart = -1;
-      }
-    }
+  const glowAmount = Math.max(0, opts.glow || 0);
+  if(glowAmount > 0 && pathData){
+    const fgRGB = hexToRGB(fg || '#000000');
+    const glowRGB = lightenColor(fgRGB, 0.4);
+    const blurRadius = Math.max(0.2, Math.sqrt(unit*unit) * (0.3 + glowAmount/80));
+    const glowOpacity = Math.min(1, 0.18 + glowAmount/120);
+    svg += `<defs><filter id="glowFx" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
+    svg += `<g filter="url(#glowFx)" opacity="${formatNumber(glowOpacity)}"><path fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" d="${pathData}"/></g>`;
   }
-  svg += '"/></svg>';
+  if(pathData){
+    svg += `<path fill="${fg}" d="${pathData}"/>`;
+  }
+  svg += '</svg>';
   return svg;
 }
 
 function buildExportSVG(result, options){
   if(!result) return '';
-  const tile = Math.max(1, options.px);
-  return buildMaskSVGString(result.mask, result.gridWidth, result.gridHeight, tile, options.bg, options.fg);
+  const tile = result.tile != null ? result.tile : Math.max(1, options.px);
+  return buildMaskSVGString(result.mask, result.gridWidth, result.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
+}
+
+function buildMaskPathData(mask, width, height, tile){
+  let path = '';
+  forEachMaskRun(mask, width, height, (x, y, length) => {
+    const rectWidth = length * tile;
+    const rectX = x * tile;
+    const rectY = y * tile;
+    path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(tile)}h-${formatNumber(rectWidth)}z`;
+  });
+  return path;
+}
+
+function formatNumber(value){
+  if(!Number.isFinite(value)) return '0';
+  const fixed = value.toFixed(3);
+  if(fixed.indexOf('.') === -1) return fixed;
+  return fixed.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
 }
 
 function stopPreviewAnimation(){
@@ -1077,7 +1096,8 @@ function drawAnimationFrame(player, index){
   paintMask(player.ctx, {
     ...frame,
     bg: player.data.bg,
-    fg: player.data.fg
+    fg: player.data.fg,
+    glow: player.data.glow
   }, player.canvas.width, player.canvas.height);
 }
 
@@ -1117,6 +1137,9 @@ function renderPreview(previewData, scale){
   preview.appendChild(frame);
 }
 
+let glowHelperCanvas = null;
+let glowHelperCtx = null;
+
 function paintMask(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   ctx.save();
@@ -1129,36 +1152,98 @@ function paintMask(ctx, data, outWidth, outHeight){
   }else{
     ctx.clearRect(0, 0, outWidth, outHeight);
   }
-  if(!data.mask){
+  const mask = data.mask;
+  if(!mask){
     ctx.restore();
     return;
   }
-  ctx.fillStyle = data.fg || '#000000';
-  const {gridWidth, gridHeight, mask} = data;
-  const tile = Math.max(1, data.tile || 1);
-  const scaleX = outWidth / (gridWidth * tile);
-  const scaleY = outHeight / (gridHeight * tile);
+  const gridWidth = data.gridWidth;
+  const gridHeight = data.gridHeight;
+  const tile = data.tile != null ? data.tile : 1;
+  const baseWidth = gridWidth * tile;
+  const baseHeight = gridHeight * tile;
+  const scaleX = baseWidth ? outWidth / baseWidth : 1;
+  const scaleY = baseHeight ? outHeight / baseHeight : 1;
   const cellWidth = tile * scaleX;
   const cellHeight = tile * scaleY;
-  for(let y=0;y<gridHeight;y++){
+  const glowAmount = Math.max(0, data.glow || 0);
+
+  if(glowAmount > 0 && ensureGlowContext(outWidth, outHeight)){
+    const helperCtx = glowHelperCtx;
+    helperCtx.setTransform(1,0,0,1,0,0);
+    helperCtx.clearRect(0, 0, outWidth, outHeight);
+    const glowRGB = hexToRGB(data.fg || '#000000');
+    const glowColor = lightenColor(glowRGB, 0.4);
+    helperCtx.fillStyle = `rgba(${glowColor[0]},${glowColor[1]},${glowColor[2]},1)`;
+    forEachMaskRun(mask, gridWidth, gridHeight, (x, y, length) => {
+      const drawX = x * cellWidth;
+      const drawY = y * cellHeight;
+      helperCtx.fillRect(drawX, drawY, length * cellWidth, cellHeight);
+    });
+    const blurRadius = Math.max(0.5, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.3 + glowAmount/70));
+    ctx.save();
+    ctx.filter = `blur(${blurRadius.toFixed(2)}px)`;
+    ctx.globalAlpha = Math.min(1, 0.18 + glowAmount/120);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(glowHelperCanvas, 0, 0, outWidth, outHeight);
+    ctx.restore();
+  }
+
+  ctx.fillStyle = data.fg || '#000000';
+  forEachMaskRun(mask, gridWidth, gridHeight, (x, y, length) => {
+    const drawX = x * cellWidth;
+    const drawY = y * cellHeight;
+    ctx.fillRect(drawX, drawY, length * cellWidth, cellHeight);
+  });
+  ctx.restore();
+}
+
+function ensureGlowContext(width, height){
+  if(!glowHelperCanvas){
+    if(typeof document !== 'undefined' && document.createElement){
+      glowHelperCanvas = document.createElement('canvas');
+    }else if(typeof OffscreenCanvas !== 'undefined'){
+      glowHelperCanvas = new OffscreenCanvas(width, height);
+    }else{
+      return false;
+    }
+  }
+  if(glowHelperCanvas.width !== width || glowHelperCanvas.height !== height){
+    glowHelperCanvas.width = width;
+    glowHelperCanvas.height = height;
+  }
+  const ctx = glowHelperCanvas.getContext('2d', {alpha: true});
+  if(!ctx) return false;
+  glowHelperCtx = ctx;
+  return true;
+}
+
+function forEachMaskRun(mask, width, height, callback){
+  for(let y=0;y<height;y++){
     let runStart = -1;
-    const rowOffset = y*gridWidth;
-    for(let x=0;x<=gridWidth;x++){
-      const value = x<gridWidth ? mask[rowOffset+x] : 0;
+    const rowOffset = y*width;
+    for(let x=0;x<=width;x++){
+      const value = x<width ? mask[rowOffset+x] : 0;
       if(value && runStart<0){
         runStart = x;
-      }else if((!value || x===gridWidth) && runStart>=0){
+      }else if((!value || x===width) && runStart>=0){
         const runLength = x - runStart;
         if(runLength>0){
-          const drawX = runStart * cellWidth;
-          const drawY = y * cellHeight;
-          ctx.fillRect(drawX, drawY, runLength * cellWidth, cellHeight);
+          callback(runStart, y, runLength);
         }
         runStart = -1;
       }
     }
   }
-  ctx.restore();
+}
+
+function lightenColor([r,g,b], amount){
+  const t = Math.max(0, Math.min(1, amount));
+  return [
+    Math.round(r + (255 - r) * t),
+    Math.round(g + (255 - g) * t),
+    Math.round(b + (255 - b) * t)
+  ];
 }
 
 function drawMaskPreview(canvas, data){
@@ -1334,7 +1419,14 @@ async function downloadGIF(){
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
   const frames = exportData.frames.map((frame) =>
-    maskToBinaryFrame(frame.mask, frame.gridWidth, frame.gridHeight, dims.width, dims.height, options.px)
+    maskToBinaryFrame(
+      frame.mask,
+      frame.gridWidth,
+      frame.gridHeight,
+      dims.width,
+      dims.height,
+      frame.tile != null ? frame.tile : options.px
+    )
   );
   const gifBytes = encodeBinaryGif(frames, dims.width, dims.height, exportData.durations, options.bg, options.fg);
   const blob = new Blob([gifBytes], {type:'image/gif'});
@@ -1374,10 +1466,11 @@ async function downloadMP4(){
     paintMask(ctx, {
       gridWidth: frame.gridWidth,
       gridHeight: frame.gridHeight,
-      tile: Math.max(1, options.px),
+      tile: frame.tile != null ? frame.tile : Math.max(1, options.px),
       mask: frame.mask,
       bg: videoBg,
-      fg: options.fg
+      fg: options.fg,
+      glow: options.glow
     }, dims.width, dims.height);
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
@@ -1419,9 +1512,9 @@ async function getVideoExportData(options){
     }
     frames.push(result);
   }
-  const tile = Math.max(1, options.px);
-  const baseWidth = Math.round(frames[0].gridWidth * tile);
-  const baseHeight = Math.round(frames[0].gridHeight * tile);
+  const firstTile = frames[0].tile != null ? frames[0].tile : Math.max(1, options.px);
+  const baseWidth = Math.round(frames[0].gridWidth * firstTile);
+  const baseHeight = Math.round(frames[0].gridHeight * firstTile);
   const totalDuration = durations.reduce((sum, val) => sum + val, 0) || (frames.length * 1000/(video.exportFPS || VIDEO_PREVIEW_FPS));
   const fps = totalDuration > 0 ? (frames.length / (totalDuration/1000)) : (video.exportFPS || VIDEO_PREVIEW_FPS);
   return {frames, durations, fps, baseWidth, baseHeight};
@@ -1460,19 +1553,24 @@ function alignVideoExportDimensions(dims, baseWidth, baseHeight){
 }
 
 function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight, tile){
-  const cellSize = Math.max(1, Math.round(tile || 1));
-  const baseWidth = Math.max(1, Math.round(gridWidth * cellSize));
-  const baseHeight = Math.max(1, Math.round(gridHeight * cellSize));
+  if(!gridWidth || !gridHeight){
+    return new Uint8Array(Math.max(1, Math.round(outWidth || 1)) * Math.max(1, Math.round(outHeight || 1)));
+  }
+  const unit = Math.max(1e-3, Math.abs(tile || 1));
+  const baseWidth = Math.max(1, Math.round(gridWidth * unit));
+  const baseHeight = Math.max(1, Math.round(gridHeight * unit));
   const targetWidth = Math.max(1, Math.round(outWidth || baseWidth));
   const targetHeight = Math.max(1, Math.round(outHeight || baseHeight));
+  const cellWidthPx = baseWidth / gridWidth;
+  const cellHeightPx = baseHeight / gridHeight;
   const output = new Uint8Array(targetWidth * targetHeight);
   for(let y=0;y<targetHeight;y++){
     const srcYPx = Math.min(baseHeight - 1, Math.floor(y * baseHeight / targetHeight));
-    const cellY = Math.min(gridHeight - 1, Math.floor(srcYPx / cellSize));
+    const cellY = Math.min(gridHeight - 1, Math.floor(srcYPx / cellHeightPx));
     const rowOffset = cellY * gridWidth;
     for(let x=0;x<targetWidth;x++){
       const srcXPx = Math.min(baseWidth - 1, Math.floor(x * baseWidth / targetWidth));
-      const cellX = Math.min(gridWidth - 1, Math.floor(srcXPx / cellSize));
+      const cellX = Math.min(gridWidth - 1, Math.floor(srcXPx / cellWidthPx));
       output[y*targetWidth + x] = mask[rowOffset + cellX] ? 1 : 0;
     }
   }

@@ -102,10 +102,10 @@ function processImage(options){
   }
   prepareBaseGray();
   const pixelSize = Math.max(1, Math.round(options.pixelSize||10));
-  const gridWidth = Math.max(1, Math.round(sourceWidth / pixelSize));
-  const gridHeight = Math.max(1, Math.round(sourceHeight / pixelSize));
-  const total = gridWidth*gridHeight;
-  const base = ensureGridBase(gridWidth, gridHeight);
+  const baseWidth = Math.max(1, Math.round(sourceWidth / pixelSize));
+  const baseHeight = Math.max(1, Math.round(sourceHeight / pixelSize));
+  const total = baseWidth*baseHeight;
+  const base = ensureGridBase(baseWidth, baseHeight);
   const working = new Float32Array(base);
   const grain = Math.max(0, Math.min(100, options.grain||0));
   if(grain>0){
@@ -138,12 +138,22 @@ function processImage(options){
 
   const dither = options.dither || 'none';
   let mask = null;
-  if(dither === 'none'){
-    mask = thresholdMask(tonal, gridWidth, gridHeight, options.threshold, invert);
+  let gridWidth = baseWidth;
+  let gridHeight = baseHeight;
+  let tile = pixelSize;
+
+  if(dither === 'halftone' || dither === 'halftone_motion'){
+    const halftone = halftoneDither(tonal, baseWidth, baseHeight, options.threshold, invert, dither, pixelSize);
+    mask = halftone.mask;
+    gridWidth = halftone.width;
+    gridHeight = halftone.height;
+    tile = pixelSize / halftone.scale;
+  }else if(dither === 'none'){
+    mask = thresholdMask(tonal, baseWidth, baseHeight, options.threshold, invert);
   }else if(dither === 'bayer4' || dither === 'bayer8' || dither === 'cross'){
-    mask = orderedDither(tonal, gridWidth, gridHeight, options.threshold, invert, dither);
+    mask = orderedDither(tonal, baseWidth, baseHeight, options.threshold, invert, dither);
   }else{
-    mask = errorDiffuse(tonal, gridWidth, gridHeight, options.threshold, invert, dither);
+    mask = errorDiffuse(tonal, baseWidth, baseHeight, options.threshold, invert, dither);
   }
 
   if(mask){
@@ -162,8 +172,9 @@ function processImage(options){
     gridWidth,
     gridHeight,
     mode: dither,
-    outputWidth: Math.round(gridWidth*pixelSize),
-    outputHeight: Math.round(gridHeight*pixelSize),
+    outputWidth: Math.round(baseWidth*pixelSize),
+    outputHeight: Math.round(baseHeight*pixelSize),
+    tile,
     mask
   };
 }
@@ -229,6 +240,12 @@ function clamp255(value){
   return value;
 }
 
+function clamp01(value){
+  if(value<0) return 0;
+  if(value>1) return 1;
+  return value;
+}
+
 function buildTonalLUT(bp, wp, gamma, bright, contrast){
   const lut = new Uint8Array(256);
   const bpv = Math.max(0, Math.min(255, typeof bp === 'number' ? bp : parseFloat(bp)||0));
@@ -280,6 +297,74 @@ function orderedDither(gray, width, height, threshold, invert, mode){
     }
   }
   return out;
+}
+
+function halftoneDither(gray, width, height, threshold, invert, mode, pixelSize){
+  const thrRaw = parseFloat(threshold);
+  let thr = Number.isFinite(thrRaw) ? thrRaw : 128;
+  if(thr < 0) thr = 0;
+  if(thr > 255) thr = 255;
+  const bias = (thr - 128) / 255;
+  const baseScale = Math.max(4, Math.min(12, Math.round(pixelSize * 0.75)));
+  const scale = mode === 'halftone_motion' ? Math.max(baseScale, Math.round(pixelSize)) : baseScale;
+  const outWidth = width * scale;
+  const outHeight = height * scale;
+  const mask = new Uint8Array(outWidth * outHeight);
+  const half = scale / 2;
+  const jitter = 0.04;
+  for(let y=0;y<height;y++){
+    const rowOffset = y*width;
+    for(let x=0;x<width;x++){
+      const idx = rowOffset + x;
+      const baseVal = gray[idx] / 255;
+      let smooth = baseVal;
+      if(mode === 'halftone_motion'){
+        let sum = baseVal * 0.65;
+        let weight = 0.65;
+        if(x>0){
+          sum += (gray[idx-1]/255) * 0.25;
+          weight += 0.25;
+        }
+        if(x<width-1){
+          sum += (gray[idx+1]/255) * 0.18;
+          weight += 0.18;
+        }
+        smooth = sum / weight;
+      }
+      let whiteness = clamp01(smooth + bias + (((x + y) & 1) ? jitter : -jitter));
+      if(invert){
+        whiteness = 1 - whiteness;
+      }
+      const density = clamp01(1 - whiteness);
+      if(density <= 0.005){
+        continue;
+      }
+      const radiusBase = Math.max(0.35, Math.sqrt(density)) * half;
+      let radiusX = radiusBase * (mode === 'halftone_motion' ? 1.7 : 1.05);
+      let radiusY = radiusBase * (mode === 'halftone_motion' ? 0.75 : 1.0);
+      const gradient = mode === 'halftone_motion'
+        ? ((x<width-1 ? gray[idx+1] : gray[idx]) - (x>0 ? gray[idx-1] : gray[idx])) / 255
+        : 0;
+      const shift = gradient * (scale * 0.12);
+      if(radiusX < 0.5) radiusX = 0.5;
+      if(radiusY < 0.5) radiusY = 0.5;
+      const baseX = x * scale;
+      const baseY = y * scale;
+      for(let sy=0; sy<scale; sy++){
+        const yy = baseY + sy;
+        const relY = (sy + 0.5) - half;
+        for(let sx=0; sx<scale; sx++){
+          const xx = baseX + sx;
+          const relX = (sx + 0.5) - half - shift;
+          const norm = (relX*relX)/(radiusX*radiusX) + (relY*relY)/(radiusY*radiusY);
+          if(norm <= 1){
+            mask[yy*outWidth + xx] = 1;
+          }
+        }
+      }
+    }
+  }
+  return {mask, width: outWidth, height: outHeight, scale};
 }
 
 function crosshatchDither(gray, width, height, threshold, invert){
