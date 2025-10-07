@@ -3,20 +3,129 @@ const $ = id => document.getElementById(id);
 const preview = $('preview'), meta = $('meta');
 const ids = ['pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum','brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum','dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR','jpegQ','jpegQNum','rasterBG'];
 const el = {}; ids.forEach(id=>el[id]=$(id));
+const uploadMessage = $('uploadMessage');
+const progressWrap = $('uploadProgressWrapper');
+const progressBar = $('uploadProgressBar');
 // link sliders and numeric inputs
 [['pixelSize','pixelSizeNum'],['threshold','thresholdNum'],['blur','blurNum'],['blackPoint','blackPointNum'],['whitePoint','whitePointNum'],['gammaVal','gammaValNum'],['brightness','brightnessNum'],['contrast','contrastNum'],['thickness','thicknessNum'],['scale','scaleNum'],['jpegQ','jpegQNum']].forEach(pair=>{
   const r=$(pair[0]), n=$(pair[1]); if(r&&n){ r.addEventListener('input',()=>{ n.value=r.value; fastRender(); }); n.addEventListener('input',()=>{ r.value=n.value; fastRender(); }); }
 });
 ['dither','invert','bg','fg','style','fmt','dpi','lockAR'].forEach(k=>{ const e=$(k); if(e) e.addEventListener('change',()=>fastRender()); });
-['fileGallery','fileCamera'].forEach(id=>{ const f=$(id); if(f) f.addEventListener('change', async e=>{ if(f.files && f.files[0]) await loadImageFile(f.files[0]); fastRender(); f.value=''; }); });
-const dropzone=document.getElementById('dropzone'); if(dropzone){ dropzone.addEventListener('dragover', e=>e.preventDefault()); dropzone.addEventListener('drop', async e=>{ e.preventDefault(); if(e.dataTransfer.files && e.dataTransfer.files[0]){ await loadImageFile(e.dataTransfer.files[0]); fastRender(); } }); }
+['fileGallery','fileCamera'].forEach(id=>{
+  const f=$(id);
+  if(!f) return;
+  f.addEventListener('change', async ()=>{
+    if(f.files && f.files[0]) await handleFile(f.files[0]);
+    f.value='';
+  });
+});
+const dropzone=document.getElementById('dropzone');
+const galleryInput=$('fileGallery');
+if(dropzone){
+  const openPicker=()=>{ if(galleryInput) galleryInput.click(); };
+  dropzone.addEventListener('click', openPicker);
+  dropzone.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '||e.key==='Spacebar'){ e.preventDefault(); openPicker(); } });
+  dropzone.addEventListener('dragenter', e=>{ e.preventDefault(); dropzone.classList.add('is-dragover'); });
+  dropzone.addEventListener('dragover', e=>{ e.preventDefault(); dropzone.classList.add('is-dragover'); if(e.dataTransfer) e.dataTransfer.dropEffect='copy'; });
+  dropzone.addEventListener('dragleave', e=>{ const rel=e.relatedTarget; if(!rel || !dropzone.contains(rel)) dropzone.classList.remove('is-dragover'); });
+  dropzone.addEventListener('drop', async e=>{
+    e.preventDefault();
+    dropzone.classList.remove('is-dragover');
+    if(e.dataTransfer.files && e.dataTransfer.files[0]){
+      await handleFile(e.dataTransfer.files[0]);
+    }
+  });
+}
 let img=null, lastSVG='', lastSize={w:800,h:400};
 const work=document.createElement('canvas'); const wctx=work.getContext('2d',{willReadFrequently:true});
-async function loadImageFile(file){ return new Promise(res=>{ const i=new Image(); i.onload=()=>{ img=i; res(); }; i.onerror=()=>{ res(); }; i.src=URL.createObjectURL(file); }); }
+function beginUpload(name=''){
+  if(uploadMessage) uploadMessage.textContent = name ? `Caricamento di ${name}...` : 'Caricamento in corso...';
+  if(progressWrap){
+    progressWrap.hidden = false;
+    progressWrap.removeAttribute('hidden');
+    progressWrap.classList.remove('is-indeterminate');
+    progressWrap.setAttribute('aria-valuenow','0');
+    progressWrap.setAttribute('aria-valuetext','0%');
+  }
+  if(progressBar) progressBar.style.width = '0%';
+}
+function updateUploadProgress(value){
+  if(!progressWrap || !progressBar) return;
+  progressWrap.classList.remove('is-indeterminate');
+  const pct = Math.max(0, Math.min(1, value||0));
+  progressBar.style.width = `${Math.round(pct*100)}%`;
+  const percentText = `${Math.round(pct*100)}%`;
+  progressWrap.setAttribute('aria-valuenow', String(Math.round(pct*100)));
+  progressWrap.setAttribute('aria-valuetext', percentText);
+}
+function setUploadIndeterminate(){
+  if(!progressWrap || !progressBar) return;
+  progressWrap.hidden = false;
+  progressWrap.removeAttribute('hidden');
+  progressWrap.classList.add('is-indeterminate');
+  progressBar.style.width = '40%';
+  progressWrap.removeAttribute('aria-valuenow');
+  progressWrap.setAttribute('aria-valuetext','Caricamento in corso');
+}
+function finishUpload(name=''){
+  if(progressWrap){
+    progressWrap.hidden = true;
+    progressWrap.classList.remove('is-indeterminate');
+    progressWrap.setAttribute('aria-valuenow','100');
+    progressWrap.setAttribute('aria-valuetext','Completato');
+  }
+  if(uploadMessage) uploadMessage.textContent = name ? `File presente: ${name}` : 'File presente';
+}
+function uploadError(){
+  if(uploadMessage) uploadMessage.textContent = 'Errore durante il caricamento';
+  if(progressWrap){
+    progressWrap.hidden = true;
+    progressWrap.classList.remove('is-indeterminate');
+    progressWrap.setAttribute('aria-valuenow','0');
+    progressWrap.setAttribute('aria-valuetext','Errore');
+  }
+}
+async function handleFile(file){
+  if(!file) return;
+  beginUpload(file.name||'');
+  try{
+    await loadImageFile(file);
+    finishUpload(file.name||'');
+    fastRender();
+  }catch(err){
+    console.error(err);
+    uploadError();
+  }
+}
+async function loadImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onprogress = e=>{
+      if(e.lengthComputable) updateUploadProgress(e.loaded/e.total);
+      else setUploadIndeterminate();
+    };
+    reader.onerror = ()=>{ reject(reader.error||new Error('Errore durante la lettura del file')); };
+    reader.onload = ()=>{
+      const data = reader.result;
+      const i=new Image();
+      i.onload=()=>{ img=i; updateUploadProgress(1); resolve(); };
+      i.onerror=err=>{ reject(err||new Error('Impossibile caricare l\'immagine')); };
+      if(typeof data==='string') i.src=data; else reject(new Error('Formato file non supportato'));
+    };
+    try{ reader.readAsDataURL(file); }
+    catch(err){ reject(err); }
+  });
+}
 
 // throttle with rAF for faster live preview
 let ticking=false;
 function fastRender(){ if(ticking) return; ticking=true; requestAnimationFrame(()=>{ generate(); ticking=false; }); }
+
+function clampInt(value, min, max){
+  const parsed = parseInt(value, 10);
+  if(Number.isNaN(parsed)) return min;
+  return Math.max(min, Math.min(max, parsed));
+}
 
 function generate(){
   try{
