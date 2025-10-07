@@ -13,18 +13,35 @@
 <main class="layout">
   <section class="preview-area">
     <div id="preview" class="preview-box"></div>
-    <div id="meta" class="meta"></div>
+    <div class="preview-footer">
+      <button id="togglePlayback" class="playback-btn" type="button" hidden aria-pressed="true">PAUSA</button>
+      <div id="meta" class="meta"></div>
+    </div>
   </section>
   <aside class="controls-panel">
     <div class="controls-top">
-      <label class="file-btn mobile-file"> <input id="fileGallery" type="file" accept="image/*"> GALLERY </label>
-      <label class="file-btn mobile-file"> <input id="fileCamera" type="file" accept="image/*" capture="environment"> CAMERA </label>
-      <div id="dropzone" class="dropzone">DRAG HERE</div>
+      <label class="file-btn primary-file">
+        <input id="fileGallery" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,image/gif">
+        CARICA FILE
+      </label>
+      <label class="file-btn mobile-only">
+        <input id="fileCamera" type="file" accept="image/*,video/mp4,video/webm" capture="environment">
+        CAMERA
+      </label>
+      <div id="dropzone" class="dropzone desktop-only" tabindex="0">TRASCINA QUI O CLICCA PER CARICARE IMMAGINI O VIDEO</div>
+      <div class="upload-feedback" aria-live="polite">
+        <div id="uploadMessage" class="upload-message">NESSUN FILE CARICATO</div>
+        <div id="uploadProgressWrapper" class="upload-progress" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="uploadProgressBar" class="progress-bar"></div>
+        </div>
+      </div>
     </div>
     <div class="controls-body">
       <div class="field"><label>PIXEL SIZE</label><div class="slider"><input id="pixelSize" type="range" min="2" max="200" step="1" value="10"><input id="pixelSizeNum" class="num" type="number" min="2" max="200" step="1" value="10"></div></div>
       <div class="field"><label>THRESHOLD</label><div class="slider"><input id="threshold" type="range" min="0" max="255" step="1" value="180"><input id="thresholdNum" class="num" type="number" min="0" max="255" step="1" value="180"></div></div>
       <div class="field"><label>BLUR</label><div class="slider"><input id="blur" type="range" min="0" max="30" step="0.5" value="0"><input id="blurNum" class="num" type="number" min="0" max="30" step="0.5" value="0"></div></div>
+      <div class="field"><label>GRAIN</label><div class="slider"><input id="grain" type="range" min="0" max="100" step="1" value="0"><input id="grainNum" class="num" type="number" min="0" max="100" step="1" value="0"></div></div>
+      <div class="field"><label>GLOW</label><div class="slider"><input id="glow" type="range" min="0" max="100" step="1" value="0"><input id="glowNum" class="num" type="number" min="0" max="100" step="1" value="0"></div></div>
 
       <div class="field"><label>BLACK POINT</label><div class="slider"><input id="blackPoint" type="range" min="0" max="255" step="1" value="0"><input id="blackPointNum" class="num" type="number" min="0" max="255" step="1" value="0"></div></div>
       <div class="field"><label>WHITE POINT</label><div class="slider"><input id="whitePoint" type="range" min="1" max="255" step="1" value="255"><input id="whitePointNum" class="num" type="number" min="1" max="255" step="1" value="255"></div></div>
@@ -35,7 +52,7 @@
       <div class="field"><label>STYLE</label><select id="style"><option value="solid">SOLID</option><option value="outline">OUTLINE</option><option value="ring">RING</option></select></div>
       <div class="field"><label>OUTLINE THICKNESS</label><div class="slider"><input id="thickness" type="range" min="1" max="6" step="1" value="2"><input id="thicknessNum" class="num" type="number" min="1" max="6" step="1" value="2"></div></div>
 
-      <div class="field"><label>DITHERING</label><select id="dither"><option value="none">NONE</option><option value="fs">FLOYD–STEINBERG</option><option value="atkinson">ATKINSON</option><option value="jjn">JJN</option><option value="stucki">STUCKI</option><option value="burkes">BURKES</option><option value="sierra2">SIERRA 2</option><option value="bayer4">BAYER 4</option><option value="bayer8">BAYER 8</option><option value="cross">CROSS-HATCH</option><option value="ascii_simple">ASCII SIMPLE</option><option value="ascii_unicode8">ASCII UNICODE 8</option><option value="ascii_chinese">IDEOGRAMMI CINESI</option></select></div>
+      <div class="field"><label>DITHERING</label><select id="dither"><option value="none">NONE</option><option value="fs">FLOYD–STEINBERG</option><option value="atkinson">ATKINSON</option><option value="jjn">JJN</option><option value="stucki">STUCKI</option><option value="burkes">BURKES</option><option value="sierra2">SIERRA 2</option><option value="bayer4">BAYER 4</option><option value="bayer8">BAYER 8</option><option value="cross">CROSS-HATCH</option><option value="halftone">HALFTONE</option><option value="halftone_motion">HALFTONE MOTION</option></select></div>
 
       <div class="field"><label>INVERT</label><select id="invert"><option value="auto">AUTO</option><option value="no">NO</option><option value="yes">YES</option></select></div>
       <div class="field"><label>BG</label><input id="bg" type="color" value="#ffffff"></div>
@@ -52,7 +69,7 @@
       <div class="field"><label><input id="lockAR" type="checkbox" checked> LOCK ASPECT</label></div>
       <div class="field"><label>JPEG QUALITY</label><div class="slider"><input id="jpegQ" type="range" min="0.6" max="0.95" step="0.01" value="0.9"><input id="jpegQNum" class="num" type="number" min="0.6" max="0.95" step="0.01" value="0.9"></div></div>
       <div class="field"><label>RASTER BACKGROUND</label><input id="rasterBG" type="color" value="#ffffff"></div>
-      <div class="field"><div class="btn-row"><button id="dlSVG">DOWNLOAD SVG</button><button id="dlPNG">DOWNLOAD PNG</button><button id="dlJPG">DOWNLOAD JPEG</button></div><small class="muted">CAP: 3000 PX PER SIDE</small></div>
+      <div class="field"><div class="btn-row"><button id="dlSVG">DOWNLOAD SVG</button><button id="dlPNG">DOWNLOAD PNG</button><button id="dlJPG">DOWNLOAD JPEG</button><button id="dlGIF" class="secondary" hidden>DOWNLOAD GIF</button><button id="dlMP4" class="secondary" hidden>DOWNLOAD MP4</button></div><small class="muted">CAP: 3000 PX PER SIDE</small></div>
     </div>
   </aside>
 </main>
