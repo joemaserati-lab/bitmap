@@ -364,10 +364,13 @@ function setSourceCanvas(canvas, name){
   state.lastScale = 1;
   if(state.offscreenSupported){
     try{
-      const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
-      const offctx = offscreen.getContext('2d', {alpha:false});
-      offctx.drawImage(canvas, 0, 0);
-      state.sourceOffscreen = offscreen;
+      if(typeof canvas.transferControlToOffscreen === 'function'){
+        const offscreen = canvas.transferControlToOffscreen();
+        state.sourceOffscreen = offscreen;
+      }else{
+        state.sourceOffscreen = null;
+        state.offscreenSupported = false;
+      }
     }catch(err){
       state.sourceOffscreen = null;
       state.offscreenSupported = false;
