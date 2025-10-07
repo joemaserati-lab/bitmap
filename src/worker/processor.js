@@ -4,6 +4,7 @@ let sourceCanvas = null;
 let sourceCtx = null;
 let sourceWidth = 0;
 let sourceHeight = 0;
+let currentSourceKey = '';
 let workCanvas = null;
 let workCtx = null;
 let workWidth = 0;
@@ -43,8 +44,9 @@ ctx.addEventListener('message', (event) => {
   }
 });
 
-function handleLoadSource({image, offscreen, width, height, version}){
+function handleLoadSource({image, offscreen, width, height, version, key}){
   if(!width || !height) return;
+  currentSourceKey = key || '';
   if(offscreen){
     sourceCanvas = offscreen;
     sourceCtx = sourceCanvas.getContext('2d', {alpha:false, desynchronized:true});
@@ -70,7 +72,7 @@ function handleLoadSource({image, offscreen, width, height, version}){
   baseGrid = null;
   lastGridWidth = 0;
   lastGridHeight = 0;
-  ctx.postMessage({type:'source-loaded', version});
+  ctx.postMessage({type:'source-loaded', version, key: currentSourceKey});
 }
 
 function handleProcess({jobId, options}){

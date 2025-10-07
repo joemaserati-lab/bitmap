@@ -20,6 +20,10 @@ for(const id of CONTROL_IDS){
 }
 
 const MAX_UPLOAD_DIMENSION = 800;
+const PREVIEW_MAX_DIMENSION = 360;
+const VIDEO_PREVIEW_FPS = 8;
+const VIDEO_EXPORT_FPS = 12;
+const MAX_VIDEO_FRAMES = 240;
 const RENDER_DEBOUNCE_MS = 90;
 
 const OFFSCREEN_SUPPORTED = typeof OffscreenCanvas !== 'undefined';
@@ -30,14 +34,19 @@ const state = {
   sourceWidth: 0,
   sourceHeight: 0,
   sourceVersion: 0,
+  sourceKind: 'image',
+  sourceKey: '',
   worker: null,
   workerReady: false,
   workerReadyPromise: null,
   workerReadyResolve: null,
   workerSourceVersion: 0,
+  workerSourceKey: '',
   pendingSourcePromise: null,
   pendingSourceVersion: 0,
+  pendingSourceKey: '',
   pendingSourceResolvers: null,
+  sourceToken: 0,
   pendingJobs: new Map(),
   currentJobId: 0,
   lastResult: null,
@@ -48,7 +57,9 @@ const state = {
   lastSize: {width: 0, height: 0},
   lastScale: 1,
   offscreenSupported: OFFSCREEN_SUPPORTED,
-  sourceOffscreen: null
+  sourceOffscreen: null,
+  videoSource: null,
+  previewPlayer: null
 };
 
 let renderQueued = false;
@@ -61,6 +72,7 @@ function init(){
   bindControls();
   bindFileInputs();
   bindDropzone();
+  bindPlaybackControl();
   window.addEventListener('resize', () => {
     if(!state.lastSVG) return;
     schedulePreviewRefresh();
@@ -93,15 +105,20 @@ function handleWorkerMessage(event){
     return;
   }
   if(data.type === 'source-loaded'){
-    const {version} = data;
+    const {version, key=''} = data;
     if(state.pendingSourcePromise && state.pendingSourceVersion === version){
       state.workerSourceVersion = version;
+      state.workerSourceKey = key;
       const {resolve} = state.pendingSourceResolvers || {};
       state.pendingSourceResolvers = null;
       state.pendingSourcePromise = null;
+      state.pendingSourceKey = '';
       if(resolve) resolve();
-    }else if(version > state.workerSourceVersion){
-      state.workerSourceVersion = version;
+    }else{
+      if(key) state.workerSourceKey = key;
+      if(version > state.workerSourceVersion){
+        state.workerSourceVersion = version;
+      }
     }
     return;
   }
@@ -212,6 +229,23 @@ function bindDropzone(){
   });
 }
 
+function bindPlaybackControl(){
+  const btn = $('togglePlayback');
+  if(!btn) return;
+  btn.addEventListener('click', () => {
+    const player = state.previewPlayer;
+    if(!player) return;
+    player.playing = !player.playing;
+    if(player.playing){
+      player.accumulator = 0;
+      player.lastTime = 0;
+      updatePlaybackButton(true, true);
+    }else{
+      updatePlaybackButton(true, false);
+    }
+  });
+}
+
 function beginUpload(name=''){
   if(uploadMessage){
     uploadMessage.textContent = name ? `Caricamento di ${name}...` : 'Caricamento in corso...';
@@ -280,11 +314,30 @@ async function handleFile(file){
   beginUpload(file.name||'');
   try{
     const type = (file.type||'').toLowerCase();
-    if(!type.startsWith('image/')){
+    let handled = false;
+    if(type.startsWith('video/')){
+      const videoData = await loadVideoAsset(file);
+      if(!videoData) throw new Error('Impossibile elaborare il video');
+      setSourceVideo(videoData, file.name||'');
+      handled = true;
+    }else if(type === 'image/gif' || (file.name && file.name.toLowerCase().endsWith('.gif'))){
+      const videoData = await loadGifAsset(file);
+      if(videoData){
+        setSourceVideo(videoData, file.name||'');
+        handled = true;
+      }else{
+        const canvas = await readImageFileToCanvas(file);
+        setSourceCanvas(canvas, file.name||'');
+        handled = true;
+      }
+    }else if(type.startsWith('image/')){
+      const canvas = await readImageFileToCanvas(file);
+      setSourceCanvas(canvas, file.name||'');
+      handled = true;
+    }
+    if(!handled){
       throw new Error('Formato file non supportato');
     }
-    const canvas = await readImageFileToCanvas(file);
-    setSourceCanvas(canvas, file.name||'');
     finishUpload(file.name||'');
     fastRender(true);
   }catch(err){
@@ -353,7 +406,187 @@ function rasterizeImageToCanvas(image, maxDim){
   return canvas;
 }
 
+async function loadVideoAsset(file){
+  return decodeVideoElementFrames(file);
+}
+
+async function loadGifAsset(file){
+  if(typeof ImageDecoder === 'undefined'){
+    return null;
+  }
+  try{
+    const decoder = new ImageDecoder({data: file, type: file.type || 'image/gif'});
+    const track = decoder.tracks ? decoder.tracks.selectedTrack : null;
+    const frameCount = track ? Math.min(track.frameCount || 0, MAX_VIDEO_FRAMES) : MAX_VIDEO_FRAMES;
+    if(frameCount <= 1){
+      return null;
+    }
+    const previewFrames = [];
+    const exportFrames = [];
+    const previewDurations = [];
+    let exportWidth = 0;
+    let exportHeight = 0;
+    for(let i=0;i<frameCount;i++){
+      const {image, duration} = await decoder.decode({frameIndex: i});
+      const frameDuration = duration && duration > 0 ? duration : Math.round(1000/VIDEO_PREVIEW_FPS);
+      const exportDims = scaleDimensions(image.width, image.height, MAX_UPLOAD_DIMENSION);
+      const previewDims = scaleDimensions(image.width, image.height, PREVIEW_MAX_DIMENSION);
+      const exportCanvas = drawBitmapToCanvas(image, exportDims.width, exportDims.height);
+      const previewCanvas = drawBitmapToCanvas(image, previewDims.width, previewDims.height);
+      exportWidth = exportDims.width;
+      exportHeight = exportDims.height;
+      exportFrames.push(exportCanvas);
+      previewFrames.push(previewCanvas);
+      previewDurations.push(frameDuration);
+      updateUploadProgress((i+1)/frameCount);
+      if(typeof image.close === 'function'){
+        try{ image.close(); }catch(err){ /* ignore */ }
+      }
+    }
+    const totalDuration = previewDurations.reduce((sum, val) => sum + val, 0) || (previewFrames.length * 1000/VIDEO_PREVIEW_FPS);
+    const fps = totalDuration > 0 ? (previewFrames.length / (totalDuration/1000)) : VIDEO_PREVIEW_FPS;
+    return {
+      type: 'video',
+      exportWidth,
+      exportHeight,
+      previewFrames,
+      exportFrames,
+      previewDurations,
+      exportDurations: previewDurations.slice(),
+      previewFPS: fps,
+      exportFPS: fps,
+      frameCount: previewFrames.length,
+      durationMs: totalDuration
+    };
+  }catch(err){
+    console.error(err);
+    return null;
+  }
+}
+
+async function decodeVideoElementFrames(file){
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.src = url;
+  video.preload = 'auto';
+  video.muted = true;
+  video.playsInline = true;
+  try{
+    await waitForVideo(video, 'loadedmetadata');
+    const width = video.videoWidth || 1;
+    const height = video.videoHeight || 1;
+    const exportDims = scaleDimensions(width, height, MAX_UPLOAD_DIMENSION);
+    const previewDims = scaleDimensions(width, height, PREVIEW_MAX_DIMENSION);
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    let frameCount = duration > 0 ? Math.round(duration * VIDEO_PREVIEW_FPS) : VIDEO_PREVIEW_FPS * 3;
+    frameCount = Math.max(1, Math.min(MAX_VIDEO_FRAMES, frameCount));
+    const interval = duration > 0 ? duration / frameCount : 1 / VIDEO_PREVIEW_FPS;
+    const previewFrames = [];
+    const exportFrames = [];
+    const durations = [];
+    for(let i=0;i<frameCount;i++){
+      const targetTime = duration > 0 ? Math.min(duration - 0.0005, Math.max(0, i * interval)) : 0;
+      await seekVideo(video, targetTime);
+      const exportCanvas = captureVideoFrame(video, exportDims.width, exportDims.height);
+      const previewCanvas = captureVideoFrame(video, previewDims.width, previewDims.height);
+      exportFrames.push(exportCanvas);
+      previewFrames.push(previewCanvas);
+      durations.push(Math.round(Math.max(16, interval * 1000)));
+      updateUploadProgress((i+1)/frameCount);
+    }
+    const totalDuration = durations.reduce((sum, val) => sum + val, 0) || (frameCount * 1000/VIDEO_PREVIEW_FPS);
+    const fps = totalDuration > 0 ? (frameCount / (totalDuration/1000)) : VIDEO_PREVIEW_FPS;
+    return {
+      type: 'video',
+      exportWidth: exportDims.width,
+      exportHeight: exportDims.height,
+      previewFrames,
+      exportFrames,
+      previewDurations: durations.slice(),
+      exportDurations: durations.slice(),
+      previewFPS: fps,
+      exportFPS: fps,
+      frameCount,
+      durationMs: totalDuration
+    };
+  }finally{
+    video.pause();
+    video.removeAttribute('src');
+    URL.revokeObjectURL(url);
+  }
+}
+
+function drawBitmapToCanvas(imageBitmap, width, height){
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(imageBitmap, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+async function waitForVideo(video, event){
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      video.removeEventListener(event, onSuccess);
+      video.removeEventListener('error', onError);
+    };
+    const onSuccess = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Errore durante il caricamento del video'));
+    };
+    video.addEventListener(event, onSuccess, {once:true});
+    video.addEventListener('error', onError, {once:true});
+  });
+}
+
+async function seekVideo(video, time){
+  return new Promise((resolve, reject) => {
+    const onSeeked = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Errore durante la lettura del video'));
+    };
+    const cleanup = () => {
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+    };
+    video.addEventListener('seeked', onSeeked, {once:true});
+    video.addEventListener('error', onError, {once:true});
+    try{
+      const maxTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.max(0, video.duration - 0.0005) : time;
+      video.currentTime = Math.min(maxTime, Math.max(0, time));
+    }catch(err){
+      cleanup();
+      reject(err);
+    }
+  });
+}
+
+function captureVideoFrame(video, width, height){
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
 function setSourceCanvas(canvas, name){
+  stopPreviewAnimation();
+  state.sourceKind = 'image';
+  state.videoSource = null;
   state.sourceCanvas = canvas;
   state.sourceName = name;
   state.sourceWidth = canvas.width;
@@ -382,7 +615,36 @@ function setSourceCanvas(canvas, name){
     state.sourceOffscreen = null;
   }
   state.sourceVersion++;
+  state.sourceKey = `still:${state.sourceVersion}`;
   state.workerSourceVersion = 0;
+  state.workerSourceKey = '';
+  state.pendingSourceKey = '';
+  updateExportButtons();
+}
+
+function setSourceVideo(videoData, name){
+  if(!videoData) return;
+  stopPreviewAnimation();
+  state.sourceKind = 'video';
+  state.videoSource = videoData;
+  state.sourceCanvas = null;
+  state.sourceOffscreen = null;
+  state.sourceName = name;
+  state.sourceWidth = videoData.exportWidth;
+  state.sourceHeight = videoData.exportHeight;
+  state.lastResult = null;
+  state.lastResultId = 0;
+  state.lastPreview = null;
+  state.lastSVG = '';
+  state.lastSVGJob = 0;
+  state.lastSize = {width: 0, height: 0};
+  state.lastScale = 1;
+  state.sourceVersion++;
+  state.sourceKey = `video:${state.sourceVersion}`;
+  state.workerSourceVersion = 0;
+  state.workerSourceKey = '';
+  state.pendingSourceKey = '';
+  updateExportButtons();
 }
 
 async function ensureWorkerReady(){
@@ -397,39 +659,54 @@ async function ensureWorkerReady(){
   }
 }
 
-async function ensureWorkerSource(canvas){
+async function ensureWorkerSource(source){
+  if(!source) return;
   await ensureWorkerReady();
-  if(state.workerSourceVersion === state.sourceVersion){
+  const width = source.width;
+  const height = source.height;
+  if(!width || !height) throw new Error('Sorgente non valida');
+  const key = source.key || `${state.sourceKey}:${width}x${height}`;
+  if(state.workerSourceKey === key){
     return;
   }
-  if(state.pendingSourcePromise && state.pendingSourceVersion === state.sourceVersion){
+  if(state.pendingSourcePromise && state.pendingSourceKey === key){
     await state.pendingSourcePromise;
     return;
   }
-  const version = state.sourceVersion;
+  const version = ++state.sourceToken;
   state.pendingSourceVersion = version;
+  state.pendingSourceKey = key;
   state.pendingSourcePromise = new Promise((resolve, reject) => {
     state.pendingSourceResolvers = {resolve, reject};
   });
-  if(state.offscreenSupported && state.sourceOffscreen){
-    const offscreen = state.sourceOffscreen;
-    state.sourceOffscreen = null;
-    state.worker.postMessage({
-      type: 'load-source',
-      version,
-      width: canvas.width,
-      height: canvas.height,
-      offscreen
-    }, [offscreen]);
+  const payload = {
+    type: 'load-source',
+    version,
+    key,
+    width,
+    height
+  };
+  const transfers = [];
+  if(source.offscreen){
+    payload.offscreen = source.offscreen;
+    transfers.push(source.offscreen);
+  }else if(source.bitmap){
+    payload.image = source.bitmap;
+    transfers.push(source.bitmap);
+  }else if(source.canvas){
+    const bitmap = await createImageBitmap(source.canvas);
+    payload.image = bitmap;
+    transfers.push(bitmap);
   }else{
-    const bitmap = await createImageBitmap(canvas);
-    state.worker.postMessage({
-      type: 'load-source',
-      version,
-      width: canvas.width,
-      height: canvas.height,
-      image: bitmap
-    }, [bitmap]);
+    throw new Error('Sorgente non valida');
+  }
+  try{
+    state.worker.postMessage(payload, transfers);
+  }catch(err){
+    state.pendingSourcePromise = null;
+    state.pendingSourceResolvers = null;
+    state.pendingSourceKey = '';
+    throw err;
   }
   await state.pendingSourcePromise;
 }
@@ -513,37 +790,109 @@ function collectRenderOptions(){
   return {px, thr, blurPx, grain, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale};
 }
 
+function buildWorkerOptions(options){
+  return {
+    pixelSize: options.px,
+    threshold: options.thr,
+    blur: options.blurPx,
+    grain: options.grain,
+    blackPoint: options.bp,
+    whitePoint: options.wp,
+    gamma: options.gam,
+    brightness: options.bri,
+    contrast: options.con,
+    style: options.style,
+    thickness: options.thick,
+    dither: options.mode,
+    invertMode: options.invertMode
+  };
+}
+
 async function generate(){
   const options = collectRenderOptions();
+  if(state.sourceKind === 'video' && state.videoSource){
+    await generateVideoPreview(options);
+    return;
+  }
   const canvas = state.sourceCanvas || getPlaceholderCanvas();
-  await ensureWorkerSource(canvas);
+  let offscreen = null;
+  if(state.offscreenSupported && state.sourceOffscreen){
+    offscreen = state.sourceOffscreen;
+    state.sourceOffscreen = null;
+  }
+  await ensureWorkerSource({
+    canvas,
+    offscreen,
+    width: canvas.width,
+    height: canvas.height,
+    key: state.sourceKey || `still:${state.sourceVersion}`
+  });
   const jobId = ++state.currentJobId;
+  const workerOptions = buildWorkerOptions(options);
   const payload = {
     type: 'process',
     jobId,
-    options: {
-      pixelSize: options.px,
-      threshold: options.thr,
-      blur: options.blurPx,
-      grain: options.grain,
-      blackPoint: options.bp,
-      whitePoint: options.wp,
-      gamma: options.gam,
-      brightness: options.bri,
-      contrast: options.con,
-      style: options.style,
-      thickness: options.thick,
-      dither: options.mode,
-      invertMode: options.invertMode
-    }
+    options: workerOptions
   };
   const result = await requestWorkerProcess(payload);
   if(!result || result.jobId !== jobId) return;
-  state.lastResult = {options, data: result};
+  state.lastResult = {type: 'image', options, frame: result};
   state.lastResultId = jobId;
   state.lastSVG = '';
   state.lastSVGJob = 0;
   const previewData = buildPreviewData(result, options);
+  state.lastPreview = previewData;
+  const previewWidth = previewData ? previewData.width : 0;
+  const previewHeight = previewData ? previewData.height : 0;
+  state.lastSize = {width: previewWidth, height: previewHeight};
+  state.lastScale = options.scale;
+  renderPreview(previewData, options.scale);
+  updateMeta(previewWidth, previewHeight);
+  updateExportButtons();
+}
+
+async function generateVideoPreview(options){
+  const video = state.videoSource;
+  if(!video || !video.previewFrames || !video.previewFrames.length){
+    state.lastResult = null;
+    state.lastPreview = null;
+    state.lastSVG = '';
+    state.lastSVGJob = 0;
+    state.lastSize = {width: 0, height: 0};
+    state.lastScale = options.scale;
+    renderPreview(null, options.scale);
+    updateMeta(0, 0);
+    updateExportButtons();
+    return;
+  }
+  const frames = [];
+  const durations = (video.previewDurations && video.previewDurations.length === video.previewFrames.length)
+    ? video.previewDurations.slice()
+    : new Array(video.previewFrames.length).fill(Math.round(1000/(video.previewFPS || VIDEO_PREVIEW_FPS)));
+  for(let i=0;i<video.previewFrames.length;i++){
+    const frameCanvas = video.previewFrames[i];
+    await ensureWorkerSource({
+      canvas: frameCanvas,
+      width: frameCanvas.width,
+      height: frameCanvas.height,
+      key: `${state.sourceKey}:preview:${i}:${frameCanvas.width}x${frameCanvas.height}`
+    });
+    const jobId = ++state.currentJobId;
+    const workerOptions = buildWorkerOptions(options);
+    const payload = {
+      type: 'process',
+      jobId,
+      options: workerOptions
+    };
+    const result = await requestWorkerProcess(payload);
+    if(!result || result.jobId !== jobId) return;
+    frames.push(result);
+  }
+  state.lastResult = {type: 'video', options, frames, durations};
+  state.lastResultId = state.currentJobId;
+  state.lastSVG = '';
+  state.lastSVGJob = 0;
+  const previewData = buildAnimationPreviewData(frames, options, durations, video.previewFPS || VIDEO_PREVIEW_FPS);
   state.lastPreview = previewData;
   const previewWidth = previewData ? previewData.width : 0;
   const previewHeight = previewData ? previewData.height : 0;
@@ -594,6 +943,35 @@ function buildPreviewData(result, options){
   };
 }
 
+function buildAnimationPreviewData(results, options, durations, fps){
+  if(!results || !results.length){
+    return null;
+  }
+  const tile = Math.max(1, options.px);
+  const first = results[0];
+  const width = Math.round(first.gridWidth * tile);
+  const height = Math.round(first.gridHeight * tile);
+  const frames = results.map((res) => ({
+    gridWidth: res.gridWidth,
+    gridHeight: res.gridHeight,
+    tile,
+    mask: res.mask
+  }));
+  const effectiveDurations = durations.slice(0, frames.length);
+  const total = effectiveDurations.reduce((sum, val) => sum + val, 0) || (frames.length * 1000/VIDEO_PREVIEW_FPS);
+  const derivedFPS = total > 0 ? (frames.length / (total/1000)) : (fps || VIDEO_PREVIEW_FPS);
+  return {
+    type: 'animation',
+    width,
+    height,
+    frames,
+    durations: effectiveDurations,
+    bg: options.bg,
+    fg: options.fg,
+    fps: derivedFPS
+  };
+}
+
 function buildMaskSVGString(mask, width, height, tile, bg, fg){
   if(!mask) return '';
   const svgW = Math.round(width*tile);
@@ -627,9 +1005,86 @@ function buildExportSVG(result, options){
   return buildMaskSVGString(result.mask, result.gridWidth, result.gridHeight, tile, options.bg, options.fg);
 }
 
+function stopPreviewAnimation(){
+  const player = state.previewPlayer;
+  if(player && player.rafId){
+    cancelAnimationFrame(player.rafId);
+  }
+  state.previewPlayer = null;
+  updatePlaybackButton(false);
+}
+
+function updatePlaybackButton(show, playing){
+  const btn = $('togglePlayback');
+  if(!btn) return;
+  if(!show){
+    btn.hidden = true;
+    btn.setAttribute('aria-pressed', 'true');
+    btn.textContent = 'PAUSA';
+    return;
+  }
+  btn.hidden = false;
+  if(playing){
+    btn.textContent = 'PAUSA';
+    btn.setAttribute('aria-pressed','true');
+  }else{
+    btn.textContent = 'PLAY';
+    btn.setAttribute('aria-pressed','false');
+  }
+}
+
+function startPreviewAnimation(canvas, data){
+  const ctx = canvas.getContext('2d', {alpha: !!(data.bg && data.bg !== 'transparent')});
+  if(!ctx || !data.frames || !data.frames.length) return;
+  const player = {
+    canvas,
+    ctx,
+    data,
+    frameIndex: 0,
+    accumulator: 0,
+    lastTime: 0,
+    playing: true,
+    rafId: 0
+  };
+  state.previewPlayer = player;
+  updatePlaybackButton(true, true);
+  drawAnimationFrame(player, 0);
+  const step = (timestamp) => {
+    if(state.previewPlayer !== player){
+      return;
+    }
+    if(!player.lastTime) player.lastTime = timestamp;
+    const delta = timestamp - player.lastTime;
+    player.lastTime = timestamp;
+    if(player.playing){
+      player.accumulator += delta;
+      let frameDuration = data.durations[player.frameIndex] || 125;
+      while(player.accumulator >= frameDuration){
+        player.accumulator -= frameDuration;
+        player.frameIndex = (player.frameIndex + 1) % data.frames.length;
+        frameDuration = data.durations[player.frameIndex] || frameDuration;
+        drawAnimationFrame(player, player.frameIndex);
+      }
+    }
+    player.rafId = requestAnimationFrame(step);
+  };
+  player.rafId = requestAnimationFrame(step);
+}
+
+function drawAnimationFrame(player, index){
+  const frame = player.data.frames[index];
+  if(!frame) return;
+  paintMask(player.ctx, {
+    ...frame,
+    bg: player.data.bg,
+    fg: player.data.fg
+  }, player.canvas.width, player.canvas.height);
+}
+
 function renderPreview(previewData, scale){
   if(!preview) return;
   preview.innerHTML = '';
+  stopPreviewAnimation();
   if(!previewData){
     if(meta) meta.textContent = '';
     return;
@@ -648,24 +1103,43 @@ function renderPreview(previewData, scale){
     canvas.style.height = '100%';
     canvas.style.imageRendering = 'pixelated';
     frame.appendChild(canvas);
+    updatePlaybackButton(false);
+  }else if(previewData.type === 'animation'){
+    const canvas = document.createElement('canvas');
+    canvas.width = previewData.width;
+    canvas.height = previewData.height;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.imageRendering = 'pixelated';
+    frame.appendChild(canvas);
+    startPreviewAnimation(canvas, previewData);
   }
   preview.appendChild(frame);
 }
 
-function drawMaskPreview(canvas, data){
-  const ctx = canvas.getContext('2d', {alpha: !!data.bg && data.bg !== 'transparent'});
-  if(!ctx) return;
+function paintMask(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
   ctx.imageSmoothingEnabled = false;
   const bg = data.bg;
   if(bg && bg !== 'transparent'){
     ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, outWidth, outHeight);
   }else{
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, outWidth, outHeight);
   }
-  if(!data.mask) return;
+  if(!data.mask){
+    ctx.restore();
+    return;
+  }
   ctx.fillStyle = data.fg || '#000000';
-  const {gridWidth, gridHeight, tile, mask} = data;
+  const {gridWidth, gridHeight, mask} = data;
+  const tile = Math.max(1, data.tile || 1);
+  const scaleX = outWidth / (gridWidth * tile);
+  const scaleY = outHeight / (gridHeight * tile);
+  const cellWidth = tile * scaleX;
+  const cellHeight = tile * scaleY;
   for(let y=0;y<gridHeight;y++){
     let runStart = -1;
     const rowOffset = y*gridWidth;
@@ -676,12 +1150,21 @@ function drawMaskPreview(canvas, data){
       }else if((!value || x===gridWidth) && runStart>=0){
         const runLength = x - runStart;
         if(runLength>0){
-          ctx.fillRect(runStart*tile, y*tile, runLength*tile, tile);
+          const drawX = runStart * cellWidth;
+          const drawY = y * cellHeight;
+          ctx.fillRect(drawX, drawY, runLength * cellWidth, cellHeight);
         }
         runStart = -1;
       }
     }
   }
+  ctx.restore();
+}
+
+function drawMaskPreview(canvas, data){
+  const ctx = canvas.getContext('2d', {alpha: !!data.bg && data.bg !== 'transparent'});
+  if(!ctx) return;
+  paintMask(ctx, data, canvas.width, canvas.height);
 }
 
 function schedulePreviewRefresh(){
@@ -732,6 +1215,19 @@ function computePreviewDimensions(width, height, scale){
 
 function updateMeta(width, height){
   if(!meta) return;
+  if(state.sourceKind === 'video' && state.videoSource){
+    const video = state.videoSource;
+    const frames = video.frameCount || (video.previewFrames ? video.previewFrames.length : 0);
+    const fps = state.lastPreview && state.lastPreview.fps ? state.lastPreview.fps : (video.previewFPS || VIDEO_PREVIEW_FPS);
+    const durationMs = video.durationMs || (frames * (1000/(fps || 1)));
+    const durationSec = durationMs / 1000;
+    if(width && height){
+      meta.textContent = `${width}×${height}px · ${frames} frame · ${fps.toFixed(1)} fps · ${durationSec.toFixed(1)}s`;
+    }else{
+      meta.textContent = `${frames} frame · ${fps.toFixed(1)} fps · ${durationSec.toFixed(1)}s`;
+    }
+    return;
+  }
   if(width && height){
     meta.textContent = `${width}×${height}px`;
   }else{
@@ -740,13 +1236,42 @@ function updateMeta(width, height){
 }
 
 function updateExportButtons(){
-  const hasResult = !!(state.lastResult && state.lastResult.data);
+  const last = state.lastResult;
+  const hasImageResult = !!(last && last.type === 'image' && last.frame);
+  const hasVideoResult = !!(last && last.type === 'video' && last.frames && last.frames.length);
   const jobActive = renderBusy || state.pendingJobs.size > 0;
+  const isVideo = state.sourceKind === 'video';
   ['dlSVG','dlPNG','dlJPG'].forEach((id) => {
     const btn = $(id);
     if(!btn) return;
     const busy = btn.dataset.busy === 'true';
-    const disabled = busy || !hasResult || jobActive;
+    let disabled = busy || jobActive || !hasImageResult;
+    if(isVideo){
+      disabled = true;
+    }
+    btn.disabled = disabled;
+    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    if(busy) btn.setAttribute('aria-busy','true');
+    else btn.removeAttribute('aria-busy');
+    if(id !== 'dlSVG'){
+      btn.hidden = isVideo;
+    }else{
+      btn.hidden = false;
+    }
+  });
+  ['dlGIF','dlMP4'].forEach((id) => {
+    const btn = $(id);
+    if(!btn) return;
+    const busy = btn.dataset.busy === 'true';
+    if(!isVideo){
+      btn.hidden = true;
+      btn.disabled = true;
+      btn.setAttribute('aria-disabled','true');
+      btn.removeAttribute('aria-busy');
+      return;
+    }
+    btn.hidden = false;
+    const disabled = busy || jobActive || !hasVideoResult;
     btn.disabled = disabled;
     btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     if(busy) btn.setAttribute('aria-busy','true');
@@ -803,39 +1328,265 @@ async function downloadRaster(format){
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
 }
 
-function getExportDimensions(){
-  const defaultW = state.lastSize.width;
-  const defaultH = state.lastSize.height;
-  let outW = parseInt(controls.outW.value||'',10);
-  let outH = parseInt(controls.outH.value||'',10);
-  const lock = controls.lockAR && controls.lockAR.checked;
-  if(!Number.isFinite(outW) || outW<=0){
-    outW = defaultW;
+async function downloadGIF(){
+  if(state.sourceKind !== 'video' || !state.videoSource) return;
+  const options = collectRenderOptions();
+  const dims = getExportDimensions();
+  const exportData = await getVideoExportData(options);
+  const frames = exportData.frames.map((frame) =>
+    maskToBinaryFrame(frame.mask, frame.gridWidth, frame.gridHeight, dims.width, dims.height)
+  );
+  const gifBytes = encodeBinaryGif(frames, dims.width, dims.height, exportData.durations, options.bg, options.fg);
+  const blob = new Blob([gifBytes], {type:'image/gif'});
+  triggerDownload(blob, 'bitmap.gif');
+}
+
+async function downloadMP4(){
+  if(state.sourceKind !== 'video' || !state.videoSource) return;
+  if(typeof MediaRecorder === 'undefined'){
+    throw new Error('MediaRecorder non supportato per l\'export video in questo browser');
   }
-  if(!Number.isFinite(outH) || outH<=0){
-    outH = defaultH;
+  const mimeType = chooseMediaRecorderType();
+  if(!mimeType){
+    throw new Error('Nessun formato MP4/WebM supportato per la registrazione');
   }
-  if(lock){
-    const ratio = defaultH ? defaultW/defaultH : 1;
-    if(outW && !outH){
-      outH = Math.round(outW/ratio);
-    }else if(outH && !outW){
-      outW = Math.round(outH*ratio);
+  const options = collectRenderOptions();
+  const dims = getExportDimensions();
+  const exportData = await getVideoExportData(options);
+  const canvas = createExportCanvas(dims.width, dims.height);
+  const videoBg = options.bg === 'transparent' ? '#ffffff' : options.bg;
+  const ctx = canvas.getContext('2d', {alpha: false});
+  if(!ctx) throw new Error('Impossibile inizializzare il canvas di export');
+  const fps = Math.max(1, Math.round(exportData.fps || VIDEO_PREVIEW_FPS));
+  const stream = canvas.captureStream(fps);
+  const recorder = new MediaRecorder(stream, {mimeType});
+  const chunks = [];
+  recorder.ondataavailable = (event) => {
+    if(event.data && event.data.size) chunks.push(event.data);
+  };
+  const finished = new Promise((resolve, reject) => {
+    recorder.onstop = resolve;
+    recorder.onerror = (event) => reject(event.error || new Error('Registrazione video fallita'));
+  });
+  recorder.start();
+  for(let i=0;i<exportData.frames.length;i++){
+    const frame = exportData.frames[i];
+    paintMask(ctx, {
+      gridWidth: frame.gridWidth,
+      gridHeight: frame.gridHeight,
+      tile: Math.max(1, options.px),
+      mask: frame.mask,
+      bg: videoBg,
+      fg: options.fg
+    }, dims.width, dims.height);
+    const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
+    await wait(delay);
+  }
+  recorder.stop();
+  await finished;
+  const blob = new Blob(chunks, {type: mimeType});
+  const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
+  triggerDownload(blob, `bitmap.${extension}`);
+}
+
+async function getVideoExportData(options){
+  const video = state.videoSource;
+  if(!video || !video.exportFrames || !video.exportFrames.length){
+    throw new Error('Nessun video disponibile per l\'export');
+  }
+  const workerOptions = buildWorkerOptions(options);
+  const frames = [];
+  const durations = (video.exportDurations && video.exportDurations.length === video.exportFrames.length)
+    ? video.exportDurations.slice()
+    : new Array(video.exportFrames.length).fill(Math.round(1000/(video.exportFPS || VIDEO_PREVIEW_FPS)));
+  for(let i=0;i<video.exportFrames.length;i++){
+    const frameCanvas = video.exportFrames[i];
+    await ensureWorkerSource({
+      canvas: frameCanvas,
+      width: frameCanvas.width,
+      height: frameCanvas.height,
+      key: `${state.sourceKey}:export:${i}:${frameCanvas.width}x${frameCanvas.height}`
+    });
+    const jobId = ++state.currentJobId;
+    const payload = {
+      type: 'process',
+      jobId,
+      options: workerOptions
+    };
+    const result = await requestWorkerProcess(payload);
+    if(!result || result.jobId !== jobId){
+      throw new Error('Elaborazione video interrotta');
     }
+    frames.push(result);
+  }
+  const tile = Math.max(1, options.px);
+  const baseWidth = Math.round(frames[0].gridWidth * tile);
+  const baseHeight = Math.round(frames[0].gridHeight * tile);
+  const totalDuration = durations.reduce((sum, val) => sum + val, 0) || (frames.length * 1000/(video.exportFPS || VIDEO_PREVIEW_FPS));
+  const fps = totalDuration > 0 ? (frames.length / (totalDuration/1000)) : (video.exportFPS || VIDEO_PREVIEW_FPS);
+  return {frames, durations, fps, baseWidth, baseHeight};
+}
+
+function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight){
+  const output = new Uint8Array(outWidth * outHeight);
+  for(let y=0;y<outHeight;y++){
+    const srcY = Math.min(gridHeight - 1, Math.floor(y * gridHeight / outHeight));
+    const rowOffset = srcY * gridWidth;
+    for(let x=0;x<outWidth;x++){
+      const srcX = Math.min(gridWidth - 1, Math.floor(x * gridWidth / outWidth));
+      output[y*outWidth + x] = mask[rowOffset + srcX] ? 1 : 0;
+    }
+  }
+  return output;
+}
+
+function hexToRGB(hex){
+  if(!hex || hex === 'transparent'){
+    return [255,255,255];
+  }
+  let value = hex.replace('#','');
+  if(value.length === 3){
+    value = value.split('').map((c) => c + c).join('');
+  }
+  if(value.length !== 6){
+    return [255,255,255];
+  }
+  const intVal = parseInt(value, 16);
+  if(Number.isNaN(intVal)) return [255,255,255];
+  return [
+    (intVal >> 16) & 0xFF,
+    (intVal >> 8) & 0xFF,
+    intVal & 0xFF
+  ];
+}
+
+function encodeBinaryGif(frames, width, height, durations, bgColor, fgColor){
+  const bytes = [];
+  const writeByte = (b) => bytes.push(b & 0xFF);
+  const writeWord = (w) => { writeByte(w & 0xFF); writeByte((w >> 8) & 0xFF); };
+  const pushString = (str) => { for(let i=0;i<str.length;i++) writeByte(str.charCodeAt(i)); };
+  const bg = hexToRGB(bgColor);
+  const fg = hexToRGB(fgColor);
+  pushString('GIF89a');
+  writeWord(width);
+  writeWord(height);
+  writeByte(0xF0);
+  writeByte(0x00);
+  writeByte(0x00);
+  writeByte(bg[0]); writeByte(bg[1]); writeByte(bg[2]);
+  writeByte(fg[0]); writeByte(fg[1]); writeByte(fg[2]);
+  writeByte(0x21); writeByte(0xFF); writeByte(0x0B);
+  pushString('NETSCAPE2.0');
+  writeByte(0x03); writeByte(0x01); writeWord(0x0000); writeByte(0x00);
+  for(let i=0;i<frames.length;i++){
+    const delay = Math.max(1, Math.round((durations[i] || 100) / 10));
+    writeByte(0x21); writeByte(0xF9); writeByte(0x04);
+    writeByte(0x04);
+    writeByte(delay & 0xFF); writeByte((delay >> 8) & 0xFF);
+    writeByte(0x00);
+    writeByte(0x00);
+    writeByte(0x2C);
+    writeWord(0); writeWord(0);
+    writeWord(width); writeWord(height);
+    writeByte(0x00);
+    writeBinaryImageData(frames[i]);
+  }
+  writeByte(0x3B);
+  return new Uint8Array(bytes);
+
+  function writeBinaryImageData(indexes){
+    const minCodeSize = 2;
+    writeByte(minCodeSize);
+    const clearCode = 1 << minCodeSize;
+    const eoiCode = clearCode + 1;
+    const codeSize = minCodeSize + 1;
+    const data = [];
+    let buffer = 0;
+    let bits = 0;
+    const pushCode = (code) => {
+      buffer |= code << bits;
+      bits += codeSize;
+      while(bits >= 8){
+        data.push(buffer & 0xFF);
+        buffer >>= 8;
+        bits -= 8;
+      }
+    };
+    pushCode(clearCode);
+    for(let i=0;i<indexes.length;i++){
+      pushCode(indexes[i]);
+    }
+    pushCode(eoiCode);
+    if(bits > 0){
+      data.push(buffer & 0xFF);
+    }
+    let offset = 0;
+    while(offset < data.length){
+      const size = Math.min(255, data.length - offset);
+      writeByte(size);
+      for(let i=0;i<size;i++){
+        writeByte(data[offset++]);
+      }
+    }
+    writeByte(0x00);
+  }
+}
+
+function chooseMediaRecorderType(){
+  if(typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function'){
+    return null;
+  }
+  const candidates = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
+  return candidates.find((type) => {
+    try{ return MediaRecorder.isTypeSupported(type); }
+    catch{ return false; }
+  }) || null;
+}
+
+function getExportDimensions(){
+  const defaultW = state.lastSize.width || state.sourceWidth || 0;
+  const defaultH = state.lastSize.height || state.sourceHeight || 0;
+  const rawW = (controls.outW.value || '').trim();
+  const rawH = (controls.outH.value || '').trim();
+  let outW = parseInt(rawW, 10);
+  let outH = parseInt(rawH, 10);
+  const lock = controls.lockAR && controls.lockAR.checked;
+  const ratio = defaultH > 0 ? defaultW / defaultH : 1;
+  if(lock){
+    if(rawW && !rawH && Number.isFinite(outW) && outW > 0){
+      outH = Math.round(outW / (ratio || 1));
+    }else if(rawH && !rawW && Number.isFinite(outH) && outH > 0){
+      outW = Math.round(outH * (ratio || 1));
+    }
+  }
+  if(!Number.isFinite(outW) || outW <= 0){
+    outW = defaultW || 1024;
+  }
+  if(!Number.isFinite(outH) || outH <= 0){
+    outH = lock ? Math.round(outW / (ratio || 1)) : (defaultH || Math.round(outW / (ratio || 1)));
   }
   outW = Math.min(3000, Math.max(1, Math.round(outW)));
   outH = Math.min(3000, Math.max(1, Math.round(outH)));
+  if(lock && !rawH){
+    outH = Math.min(3000, Math.max(1, Math.round(outW / (ratio || 1))));
+  }
   return {width: outW, height: outH};
 }
 
 function ensureSVGString(){
-  if(!state.lastResult || !state.lastResult.data){
+  if(!state.lastResult || state.lastResult.type !== 'image' || !state.lastResult.frame){
     return '';
   }
   if(state.lastSVG && state.lastSVGJob === state.lastResultId){
     return state.lastSVG;
   }
-  const svgString = buildExportSVG(state.lastResult.data, state.lastResult.options);
+  const svgString = buildExportSVG(state.lastResult.frame, state.lastResult.options);
   state.lastSVG = svgString;
   state.lastSVGJob = state.lastResultId;
   return svgString;
@@ -1114,6 +1865,38 @@ function bindExportButtons(){
         await downloadRaster('image/jpeg');
       }finally{
         setButtonBusy(jpgBtn, false);
+        updateExportButtons();
+      }
+    });
+  }
+  const gifBtn = $('dlGIF');
+  if(gifBtn){
+    gifBtn.addEventListener('click', async () => {
+      if(gifBtn.dataset.busy === 'true') return;
+      setButtonBusy(gifBtn, true, 'Preparing…');
+      try{
+        await downloadGIF();
+      }catch(err){
+        console.error(err);
+        alert(err && err.message ? err.message : 'Impossibile esportare la GIF');
+      }finally{
+        setButtonBusy(gifBtn, false);
+        updateExportButtons();
+      }
+    });
+  }
+  const mp4Btn = $('dlMP4');
+  if(mp4Btn){
+    mp4Btn.addEventListener('click', async () => {
+      if(mp4Btn.dataset.busy === 'true') return;
+      setButtonBusy(mp4Btn, true, 'Preparing…');
+      try{
+        await downloadMP4();
+      }catch(err){
+        console.error(err);
+        alert(err && err.message ? err.message : 'Impossibile esportare il video');
+      }finally{
+        setButtonBusy(mp4Btn, false);
         updateExportButtons();
       }
     });
