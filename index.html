@@ -15,20 +15,19 @@
     <div id="preview" class="preview-box"></div>
     <div class="preview-footer">
       <div id="meta" class="meta"></div>
-      <button id="previewToggle" class="preview-toggle" type="button" hidden aria-hidden="true" aria-disabled="true">PAUSA ANTEPRIMA</button>
     </div>
   </section>
   <aside class="controls-panel">
     <div class="controls-top">
       <label class="file-btn primary-file">
-        <input id="fileGallery" type="file" accept="image/*,video/mp4,image/gif">
+        <input id="fileGallery" type="file" accept="image/*">
         CARICA FILE
       </label>
       <label class="file-btn mobile-only">
-        <input id="fileCamera" type="file" accept="image/*,video/mp4,image/gif" capture="environment">
+        <input id="fileCamera" type="file" accept="image/*" capture="environment">
         CAMERA
       </label>
-      <div id="dropzone" class="dropzone" tabindex="0">TRASCINA QUI O CLICCA PER CARICARE IMMAGINI, GIF O MP4</div>
+      <div id="dropzone" class="dropzone desktop-only" tabindex="0">TRASCINA QUI O CLICCA PER CARICARE IMMAGINI</div>
       <div class="upload-feedback" aria-live="polite">
         <div id="uploadMessage" class="upload-message">NESSUN FILE CARICATO</div>
         <div id="uploadProgressWrapper" class="upload-progress" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
