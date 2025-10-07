@@ -117,7 +117,7 @@ function processImage(options){
   const blurAmount = Math.max(0, options.blur||0);
   if(blurAmount>0){
     const radius = Math.max(1, Math.round(blurAmount / Math.max(1, pixelSize/2)));
-    applyGaussianBlur(working, gridWidth, gridHeight, radius);
+    applyGaussianBlur(working, baseWidth, baseHeight, radius);
   }
 
   const tonal = new Uint8Array(total);

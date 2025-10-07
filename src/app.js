@@ -10,7 +10,7 @@ const CONTROL_IDS = [
   'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
   'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
   'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
-  'dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR',
+  'dither','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
   'jpegQ','jpegQNum','rasterBG'
 ];
 
@@ -178,6 +178,182 @@ function bindControls(){
     if(!el) continue;
     el.addEventListener('change', () => fastRender());
   }
+
+  if(controls.outW){
+    controls.outW.addEventListener('input', () => handleExportDimensionInput('width'));
+    controls.outW.addEventListener('change', () => handleExportDimensionInput('width'));
+  }
+  if(controls.outH){
+    controls.outH.addEventListener('input', () => handleExportDimensionInput('height'));
+    controls.outH.addEventListener('change', () => handleExportDimensionInput('height'));
+  }
+  if(controls.exportScale){
+    controls.exportScale.addEventListener('change', () => {
+      applyExportScalePreset(true);
+      updateExportButtons();
+    });
+  }
+}
+
+function getExportScalePreset(){
+  if(!controls.exportScale) return 1;
+  const raw = parseFloat(controls.exportScale.value || '1');
+  if(!Number.isFinite(raw) || raw < 1) return 1;
+  return raw;
+}
+
+function getExportBaseSize(){
+  if(state.lastResult){
+    if(state.lastResult.type === 'image' && state.lastResult.frame){
+      const frame = state.lastResult.frame;
+      return {
+        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
+        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
+      };
+    }
+    if(state.lastResult.type === 'video' && state.lastResult.frames && state.lastResult.frames.length){
+      const frame = state.lastResult.frames[0];
+      return {
+        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
+        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
+      };
+    }
+  }
+  if(state.sourceWidth && state.sourceHeight){
+    return {width: state.sourceWidth, height: state.sourceHeight};
+  }
+  if(state.lastSize.width && state.lastSize.height){
+    return {width: state.lastSize.width, height: state.lastSize.height};
+  }
+  return {width: 1024, height: 1024};
+}
+
+function updateExportDimensionPlaceholders(){
+  if(!controls.outW || !controls.outH) return;
+  const base = getExportBaseSize();
+  const placeholderW = base.width ? Math.min(3000, Math.max(1, Math.round(base.width))) : '';
+  const placeholderH = base.height ? Math.min(3000, Math.max(1, Math.round(base.height))) : '';
+  controls.outW.placeholder = placeholderW ? String(placeholderW) : 'auto';
+  controls.outH.placeholder = placeholderH ? String(placeholderH) : 'auto';
+}
+
+function areDimensionsAuto(){
+  if(!controls.outW || !controls.outH) return false;
+  if(controls.outW.dataset.autoDim !== 'true' || controls.outH.dataset.autoDim !== 'true'){
+    return false;
+  }
+  const currentScale = controls.exportScale ? controls.exportScale.value || '1' : '1';
+  return controls.outW.dataset.autoScale === currentScale && controls.outH.dataset.autoScale === currentScale;
+}
+
+function setDimensionInputs(width, height, markAuto=false, scaleValue='1'){
+  if(controls.outW){
+    controls.outW.value = width ? String(Math.max(1, Math.round(width))) : '';
+    if(markAuto){
+      controls.outW.dataset.autoDim = 'true';
+      controls.outW.dataset.autoScale = scaleValue;
+    }else{
+      delete controls.outW.dataset.autoDim;
+      delete controls.outW.dataset.autoScale;
+    }
+  }
+  if(controls.outH){
+    controls.outH.value = height ? String(Math.max(1, Math.round(height))) : '';
+    if(markAuto){
+      controls.outH.dataset.autoDim = 'true';
+      controls.outH.dataset.autoScale = scaleValue;
+    }else{
+      delete controls.outH.dataset.autoDim;
+      delete controls.outH.dataset.autoScale;
+    }
+  }
+}
+
+function clearDimensionAuto(){
+  if(controls.outW){
+    delete controls.outW.dataset.autoDim;
+    delete controls.outW.dataset.autoScale;
+  }
+  if(controls.outH){
+    delete controls.outH.dataset.autoDim;
+    delete controls.outH.dataset.autoScale;
+  }
+}
+
+function clampExportDimensions(width, height, ratio){
+  let w = Math.max(1, Math.round(width));
+  let h = Math.max(1, Math.round(height));
+  if(ratio && ratio > 0){
+    h = Math.max(1, Math.round(w / ratio));
+  }
+  const limitW = w > 0 ? 3000 / w : 1;
+  const limitH = h > 0 ? 3000 / h : 1;
+  const scale = Math.min(limitW, limitH, 1);
+  if(scale < 1){
+    w = Math.max(1, Math.round(w * scale));
+    h = Math.max(1, Math.round(h * scale));
+    if(ratio && ratio > 0){
+      h = Math.max(1, Math.round(w / ratio));
+    }
+  }
+  w = Math.min(3000, Math.max(1, w));
+  h = Math.min(3000, Math.max(1, h));
+  return {width: w, height: h};
+}
+
+function applyExportScalePreset(force){
+  if(!controls.exportScale) return;
+  const scaleValue = controls.exportScale.value || '1';
+  const factor = parseFloat(scaleValue);
+  if(!Number.isFinite(factor) || factor < 1){
+    if(force){
+      clearDimensionAuto();
+    }
+    updateExportDimensionPlaceholders();
+    return;
+  }
+  if(!force && !areDimensionsAuto()){
+    return;
+  }
+  const base = getExportBaseSize();
+  if(base.width <= 0 || base.height <= 0){
+    updateExportDimensionPlaceholders();
+    return;
+  }
+  const ratio = base.height > 0 ? base.width / base.height : 1;
+  const scaled = clampExportDimensions(base.width * factor, base.height * factor, ratio);
+  setDimensionInputs(scaled.width, scaled.height, true, scaleValue);
+  updateExportDimensionPlaceholders();
+}
+
+function handleExportDimensionInput(source){
+  if(controls.exportScale && controls.exportScale.value !== '1'){
+    controls.exportScale.value = '1';
+  }
+  clearDimensionAuto();
+  if(!controls.lockAR || !controls.lockAR.checked) return;
+  const base = getExportBaseSize();
+  const ratio = base.height > 0 ? base.width / base.height : 0;
+  if(!(ratio > 0)) return;
+  if(source === 'width' && controls.outW){
+    const width = parseInt(controls.outW.value || '', 10);
+    if(Number.isFinite(width) && width > 0){
+      const dims = clampExportDimensions(width, width / ratio, ratio);
+      setDimensionInputs(dims.width, dims.height, false);
+    }
+  }else if(source === 'height' && controls.outH){
+    const height = parseInt(controls.outH.value || '', 10);
+    if(Number.isFinite(height) && height > 0){
+      const width = height * ratio;
+      const dims = clampExportDimensions(width, height, ratio);
+      setDimensionInputs(dims.width, dims.height, false);
+    }
+  }
+}
+
+function refreshExportDimensionUI(){
+  updateExportDimensionPlaceholders();
+  applyExportScalePreset(false);
 }
 
 function bindFileInputs(){
@@ -621,6 +797,7 @@ function setSourceCanvas(canvas, name){
   state.workerSourceKey = '';
   state.pendingSourceKey = '';
   updateExportButtons();
+  refreshExportDimensionUI();
 }
 
 function setSourceVideo(videoData, name){
@@ -646,6 +823,7 @@ function setSourceVideo(videoData, name){
   state.workerSourceKey = '';
   state.pendingSourceKey = '';
   updateExportButtons();
+  refreshExportDimensionUI();
 }
 
 async function ensureWorkerReady(){
@@ -851,6 +1029,7 @@ async function generate(){
   renderPreview(previewData, options.scale);
   updateMeta(previewWidth, previewHeight);
   updateExportButtons();
+  refreshExportDimensionUI();
 }
 
 async function generateVideoPreview(options){
@@ -903,6 +1082,7 @@ async function generateVideoPreview(options){
   renderPreview(previewData, options.scale);
   updateMeta(previewWidth, previewHeight);
   updateExportButtons();
+  refreshExportDimensionUI();
 }
 
 function requestWorkerProcess(message){
@@ -1689,33 +1869,45 @@ function chooseMediaRecorderType(){
 }
 
 function getExportDimensions(){
-  const defaultW = state.lastSize.width || state.sourceWidth || 0;
-  const defaultH = state.lastSize.height || state.sourceHeight || 0;
+  const base = getExportBaseSize();
+  let defaultW = Math.max(0, Math.round(base.width || 0));
+  let defaultH = Math.max(0, Math.round(base.height || 0));
+  if(defaultW <= 0 || defaultH <= 0){
+    defaultW = Math.max(1, Math.round(state.sourceWidth || state.lastSize.width || 1024));
+    defaultH = Math.max(1, Math.round(state.sourceHeight || state.lastSize.height || defaultW));
+  }
   const rawW = (controls.outW.value || '').trim();
   const rawH = (controls.outH.value || '').trim();
+  const lock = controls.lockAR && controls.lockAR.checked;
+  const preset = getExportScalePreset();
+  const ratio = defaultH > 0 ? defaultW / defaultH : 0;
   let outW = parseInt(rawW, 10);
   let outH = parseInt(rawH, 10);
-  const lock = controls.lockAR && controls.lockAR.checked;
-  const ratio = defaultH > 0 ? defaultW / defaultH : 1;
-  if(lock){
-    if(rawW && !rawH && Number.isFinite(outW) && outW > 0){
-      outH = Math.round(outW / (ratio || 1));
-    }else if(rawH && !rawW && Number.isFinite(outH) && outH > 0){
-      outW = Math.round(outH * (ratio || 1));
+  const usingPreset = (!rawW && !rawH && preset > 1);
+  if(usingPreset){
+    outW = defaultW * preset;
+    outH = defaultH * preset;
+  }else{
+    if(lock && ratio > 0){
+      if(rawW && !rawH && Number.isFinite(outW) && outW > 0){
+        outH = outW / ratio;
+      }else if(rawH && !rawW && Number.isFinite(outH) && outH > 0){
+        outW = outH * ratio;
+      }
+    }
+    if(!Number.isFinite(outW) || outW <= 0){
+      outW = defaultW || 1024;
+    }
+    if(!Number.isFinite(outH) || outH <= 0){
+      if(lock && ratio > 0){
+        outH = outW / ratio;
+      }else{
+        outH = defaultH || (ratio > 0 ? outW / ratio : outW);
+      }
     }
   }
-  if(!Number.isFinite(outW) || outW <= 0){
-    outW = defaultW || 1024;
-  }
-  if(!Number.isFinite(outH) || outH <= 0){
-    outH = lock ? Math.round(outW / (ratio || 1)) : (defaultH || Math.round(outW / (ratio || 1)));
-  }
-  outW = Math.min(3000, Math.max(1, Math.round(outW)));
-  outH = Math.min(3000, Math.max(1, Math.round(outH)));
-  if(lock && !rawH){
-    outH = Math.min(3000, Math.max(1, Math.round(outW / (ratio || 1))));
-  }
-  return {width: outW, height: outH};
+  const dims = clampExportDimensions(outW, outH, lock && ratio > 0 ? ratio : 0);
+  return dims;
 }
 
 function ensureSVGString(){
