@@ -1331,10 +1331,10 @@ async function downloadRaster(format){
 async function downloadGIF(){
   if(state.sourceKind !== 'video' || !state.videoSource) return;
   const options = collectRenderOptions();
-  const dims = getExportDimensions();
   const exportData = await getVideoExportData(options);
+  const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
   const frames = exportData.frames.map((frame) =>
-    maskToBinaryFrame(frame.mask, frame.gridWidth, frame.gridHeight, dims.width, dims.height)
+    maskToBinaryFrame(frame.mask, frame.gridWidth, frame.gridHeight, dims.width, dims.height, options.px)
   );
   const gifBytes = encodeBinaryGif(frames, dims.width, dims.height, exportData.durations, options.bg, options.fg);
   const blob = new Blob([gifBytes], {type:'image/gif'});
@@ -1351,9 +1351,9 @@ async function downloadMP4(){
     throw new Error('Nessun formato MP4/WebM supportato per la registrazione');
   }
   const options = collectRenderOptions();
-  const dims = getExportDimensions();
   const exportData = await getVideoExportData(options);
-  const canvas = createExportCanvas(dims.width, dims.height);
+  const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
+  const canvas = createExportCanvas(dims.width, dims.height, {forceDOM: true});
   const videoBg = options.bg === 'transparent' ? '#ffffff' : options.bg;
   const ctx = canvas.getContext('2d', {alpha: false});
   if(!ctx) throw new Error('Impossibile inizializzare il canvas di export');
@@ -1427,14 +1427,53 @@ async function getVideoExportData(options){
   return {frames, durations, fps, baseWidth, baseHeight};
 }
 
-function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight){
-  const output = new Uint8Array(outWidth * outHeight);
-  for(let y=0;y<outHeight;y++){
-    const srcY = Math.min(gridHeight - 1, Math.floor(y * gridHeight / outHeight));
-    const rowOffset = srcY * gridWidth;
-    for(let x=0;x<outWidth;x++){
-      const srcX = Math.min(gridWidth - 1, Math.floor(x * gridWidth / outWidth));
-      output[y*outWidth + x] = mask[rowOffset + srcX] ? 1 : 0;
+function alignVideoExportDimensions(dims, baseWidth, baseHeight){
+  if(!dims) return {width: baseWidth || 1, height: baseHeight || 1};
+  if(!baseWidth || !baseHeight){
+    return {width: dims.width, height: dims.height};
+  }
+  const ratio = baseHeight > 0 ? (baseWidth / baseHeight) : 1;
+  let width = Math.max(1, Math.min(3000, Math.round(dims.width || baseWidth)));
+  let height = Math.max(1, Math.min(3000, Math.round(dims.height || Math.round(width / (ratio || 1)))));
+  const hasWidthInput = !!(controls.outW && controls.outW.value && controls.outW.value.trim() !== '');
+  const hasHeightInput = !!(controls.outH && controls.outH.value && controls.outH.value.trim() !== '');
+  if(hasWidthInput && !hasHeightInput){
+    height = Math.max(1, Math.min(3000, Math.round(width / (ratio || 1))));
+  }else if(hasHeightInput && !hasWidthInput){
+    width = Math.max(1, Math.min(3000, Math.round(height * (ratio || 1))));
+  }else{
+    const expectedHeight = Math.max(1, Math.round(width / (ratio || 1)));
+    const expectedWidth = Math.max(1, Math.round(height * (ratio || 1)));
+    const heightDelta = Math.abs(expectedHeight - height);
+    const widthDelta = Math.abs(expectedWidth - width);
+    if(heightDelta > widthDelta){
+      height = expectedHeight;
+    }else{
+      width = expectedWidth;
+      height = Math.max(1, Math.round(width / (ratio || 1)));
+    }
+  }
+  return {
+    width: Math.max(1, Math.min(3000, width)),
+    height: Math.max(1, Math.min(3000, height))
+  };
+}
+
+function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight, tile){
+  const cellSize = Math.max(1, Math.round(tile || 1));
+  const baseWidth = Math.max(1, Math.round(gridWidth * cellSize));
+  const baseHeight = Math.max(1, Math.round(gridHeight * cellSize));
+  const targetWidth = Math.max(1, Math.round(outWidth || baseWidth));
+  const targetHeight = Math.max(1, Math.round(outHeight || baseHeight));
+  const output = new Uint8Array(targetWidth * targetHeight);
+  for(let y=0;y<targetHeight;y++){
+    const srcYPx = Math.min(baseHeight - 1, Math.floor(y * baseHeight / targetHeight));
+    const cellY = Math.min(gridHeight - 1, Math.floor(srcYPx / cellSize));
+    const rowOffset = cellY * gridWidth;
+    for(let x=0;x<targetWidth;x++){
+      const srcXPx = Math.min(baseWidth - 1, Math.floor(x * baseWidth / targetWidth));
+      const cellX = Math.min(gridWidth - 1, Math.floor(srcXPx / cellSize));
+      output[y*targetWidth + x] = mask[rowOffset + cellX] ? 1 : 0;
     }
   }
   return output;
@@ -1465,12 +1504,14 @@ function encodeBinaryGif(frames, width, height, durations, bgColor, fgColor){
   const writeByte = (b) => bytes.push(b & 0xFF);
   const writeWord = (w) => { writeByte(w & 0xFF); writeByte((w >> 8) & 0xFF); };
   const pushString = (str) => { for(let i=0;i<str.length;i++) writeByte(str.charCodeAt(i)); };
-  const bg = hexToRGB(bgColor);
+  const transparent = !bgColor || bgColor === 'transparent';
+  const bg = transparent ? [0,0,0] : hexToRGB(bgColor);
   const fg = hexToRGB(fgColor);
   pushString('GIF89a');
   writeWord(width);
   writeWord(height);
-  writeByte(0xF0);
+  const packedFields = 0x80; // global color table present, 2 entries
+  writeByte(packedFields);
   writeByte(0x00);
   writeByte(0x00);
   writeByte(bg[0]); writeByte(bg[1]); writeByte(bg[2]);
@@ -1481,9 +1522,9 @@ function encodeBinaryGif(frames, width, height, durations, bgColor, fgColor){
   for(let i=0;i<frames.length;i++){
     const delay = Math.max(1, Math.round((durations[i] || 100) / 10));
     writeByte(0x21); writeByte(0xF9); writeByte(0x04);
-    writeByte(0x04);
+    writeByte(transparent ? 0x01 : 0x00);
     writeByte(delay & 0xFF); writeByte((delay >> 8) & 0xFF);
-    writeByte(0x00);
+    writeByte(transparent ? 0x00 : 0x00);
     writeByte(0x00);
     writeByte(0x2C);
     writeWord(0); writeWord(0);
@@ -1661,8 +1702,9 @@ async function createSVGDrawable(svgString){
   };
 }
 
-function createExportCanvas(width, height){
-  if(typeof OffscreenCanvas !== 'undefined'){
+function createExportCanvas(width, height, opts={}){
+  const {forceDOM = false} = opts;
+  if(!forceDOM && typeof OffscreenCanvas !== 'undefined'){
     return new OffscreenCanvas(width, height);
   }
   const canvas = document.createElement('canvas');
