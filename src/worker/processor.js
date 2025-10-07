@@ -285,28 +285,34 @@ function crosshatchDither(gray, width, height, threshold, invert){
   const thr = Math.max(0, Math.min(255, parseInt(threshold,10)||0));
   const bias = thr - 128;
   for(let y=0;y<height;y++){
-    const ym = y & 3;
-    const yEven = (y & 1) === 0;
+    const modY = y & 3;
     for(let x=0;x<width;x++){
       const idx = y*width + x;
-      const xm = x & 3;
+      const modX = x & 3;
       const value = gray[idx];
-      let intensity = invert ? value : (255 - value);
-      intensity = clamp255(intensity + bias);
-      let level = Math.floor(intensity / 51);
+      let tone = invert ? value : (255 - value);
+      tone = clamp255(tone + bias);
+      let level = Math.floor((tone/255) * 6);
       if(level < 0) level = 0;
       else if(level > 5) level = 5;
+
       let on = false;
       if(level >= 5){
         on = true;
-      }else if(level === 4){
-        on = (xm === ym) || ((xm + ym) === 3) || yEven || ((x & 1) === 0);
-      }else if(level === 3){
-        on = (xm === ym) || ((xm + ym) === 3) || yEven;
-      }else if(level === 2){
-        on = (xm === ym) || ((xm + ym) === 3);
-      }else if(level === 1){
-        on = (xm === ym);
+      }else{
+        const diagA = modX === modY;
+        const diagB = (modX + modY) === 3;
+        const horiz = (modY === 0) || (modY === 2);
+        const vert = (modX === 0) || (modX === 2);
+        if(level === 4){
+          on = diagA || diagB || horiz || vert;
+        }else if(level === 3){
+          on = diagA || diagB || horiz;
+        }else if(level === 2){
+          on = diagA || diagB;
+        }else if(level === 1){
+          on = diagA;
+        }
       }
       out[idx] = on ? 1 : 0;
     }
