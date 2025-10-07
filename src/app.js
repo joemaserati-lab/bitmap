@@ -1,6 +1,7 @@
 
 const $ = id => document.getElementById(id);
 const preview = $('preview'), meta = $('meta');
+const MAX_UPLOAD_DIMENSION = 800;
 const ids = ['pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum','brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum','dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR','jpegQ','jpegQNum','rasterBG'];
 const el = {}; ids.forEach(id=>el[id]=$(id));
 const uploadMessage = $('uploadMessage');
@@ -74,7 +75,10 @@ function finishUpload(name=''){
     progressWrap.setAttribute('aria-valuenow','100');
     progressWrap.setAttribute('aria-valuetext','Completato');
   }
-  if(uploadMessage) uploadMessage.textContent = name ? `File presente: ${name}` : 'File presente';
+  if(uploadMessage){
+    const dims = img ? ` (${img.naturalWidth}×${img.naturalHeight})` : '';
+    uploadMessage.textContent = name ? `File presente: ${name}${dims}` : `File presente${dims}`;
+  }
 }
 function uploadError(){
   if(uploadMessage) uploadMessage.textContent = 'Errore durante il caricamento';
@@ -105,15 +109,44 @@ async function loadImageFile(file){
       else setUploadIndeterminate();
     };
     reader.onerror = ()=>{ reject(reader.error||new Error('Errore durante la lettura del file')); };
-    reader.onload = ()=>{
+    reader.onload = async ()=>{
       const data = reader.result;
       const i=new Image();
-      i.onload=()=>{ img=i; updateUploadProgress(1); resolve(); };
+      i.onload=async ()=>{
+        try{
+          const finalImg = await ensureMaxDimensions(i, MAX_UPLOAD_DIMENSION);
+          img = finalImg;
+          updateUploadProgress(1);
+          resolve();
+        }catch(err){
+          reject(err);
+        }
+      };
       i.onerror=err=>{ reject(err||new Error('Impossibile caricare l\'immagine')); };
       if(typeof data==='string') i.src=data; else reject(new Error('Formato file non supportato'));
     };
     try{ reader.readAsDataURL(file); }
     catch(err){ reject(err); }
+  });
+}
+
+function ensureMaxDimensions(image, maxDim){
+  const maxSide = Math.max(image.naturalWidth, image.naturalHeight);
+  if(maxSide <= maxDim) return Promise.resolve(image);
+  const scale = maxDim / maxSide;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(image,0,0,canvas.width,canvas.height);
+  const dataUrl = canvas.toDataURL('image/png');
+  return new Promise((resolve,reject)=>{
+    const resized = new Image();
+    resized.onload=()=>resolve(resized);
+    resized.onerror=err=>reject(err||new Error('Impossibile ridimensionare l\'immagine'));
+    resized.src=dataUrl;
   });
 }
 
@@ -225,7 +258,52 @@ function buildASCII(gray,w,h,px,bg,fg,mode){
   svg+=`</g></svg>`; return svg;
 }
 
-function renderPreview(svg,scale=1){ preview.innerHTML=''; const wrapper=document.createElement('div'); wrapper.innerHTML=svg; const node=wrapper.firstChild; node.style.transformOrigin='top left'; node.style.transform=`scale(${scale})`; preview.appendChild(node); meta.textContent=`${lastSize.w}×${lastSize.h}px`; }
+function renderPreview(svg,scale=1){
+  if(!svg) return;
+  preview.innerHTML='';
+  const hostRect = preview.getBoundingClientRect();
+  const availableW = Math.max(1, preview.clientWidth || hostRect.width || lastSize.w);
+  const availableH = Math.max(1, preview.clientHeight || hostRect.height || lastSize.h);
+  const ratio = lastSize.h ? lastSize.w / lastSize.h : 1;
+  const userScale = Number.isFinite(scale) && scale>0 ? scale : 1;
+  let baseW = availableW;
+  let baseH = ratio ? baseW / ratio : availableH;
+  if(baseH > availableH){
+    baseH = availableH;
+    baseW = baseH * ratio;
+  }
+  const targetW = Math.min(baseW * userScale, availableW);
+  const targetH = Math.min(baseH * userScale, availableH);
+  const finalW = Math.max(1, Math.round(targetW));
+  const finalH = Math.max(1, Math.round(targetH));
+  const frame=document.createElement('div');
+  frame.className='preview-frame';
+  frame.style.width=`${finalW}px`;
+  frame.style.height=`${finalH}px`;
+  const wrapper=document.createElement('div');
+  wrapper.innerHTML=svg;
+  const node=wrapper.firstChild;
+  if(node){
+    node.setAttribute('width','100%');
+    node.setAttribute('height','100%');
+    node.setAttribute('preserveAspectRatio','xMidYMid meet');
+    node.style.width='100%';
+    node.style.height='100%';
+    frame.appendChild(node);
+  }
+  preview.appendChild(frame);
+  meta.textContent=`${lastSize.w}×${lastSize.h}px`;
+}
+
+let resizeRaf=null;
+window.addEventListener('resize',()=>{
+  if(!lastSVG) return;
+  if(resizeRaf) cancelAnimationFrame(resizeRaf);
+  resizeRaf=requestAnimationFrame(()=>{
+    resizeRaf=null;
+    renderPreview(lastSVG, parseFloat(el.scale.value||1));
+  });
+});
 
 // EXPORT (simple)
 document.getElementById('dlSVG').addEventListener('click', ()=>{ if(!lastSVG) return; const blob=new Blob([lastSVG],{type:'image/svg+xml'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='bitmap.svg'; a.click(); });
