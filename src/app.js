@@ -730,8 +730,24 @@ function schedulePreviewRefresh(){
 
 function computePreviewDimensions(width, height, scale){
   const hostRect = preview.getBoundingClientRect();
-  const availableW = Math.max(1, preview.clientWidth || hostRect.width || width);
-  const availableH = Math.max(1, preview.clientHeight || hostRect.height || height);
+  let availableW = preview.clientWidth || hostRect.width || 0;
+  let availableH = preview.clientHeight || hostRect.height || 0;
+  if(availableW <= 0){
+    const parentRect = preview.parentElement ? preview.parentElement.getBoundingClientRect() : null;
+    availableW = parentRect && parentRect.width ? parentRect.width : width;
+  }
+  if(availableH <= 0){
+    const parentRect = preview.parentElement ? preview.parentElement.getBoundingClientRect() : null;
+    availableH = parentRect && parentRect.height ? parentRect.height : height;
+  }
+  if(availableW <= 0){
+    availableW = Math.max(width, window.innerWidth || 1);
+  }
+  if(availableH <= 0){
+    availableH = Math.max(height, (window.innerHeight || 1) * 0.5);
+  }
+  availableW = Math.max(1, availableW);
+  availableH = Math.max(1, availableH);
   const ratio = height ? width/height : 1;
   const userScale = Number.isFinite(scale) && scale>0 ? scale : 1;
   let baseW = availableW;
