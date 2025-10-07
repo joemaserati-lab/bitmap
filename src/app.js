@@ -2,6 +2,9 @@
 const $ = id => document.getElementById(id);
 const preview = $('preview'), meta = $('meta');
 const MAX_UPLOAD_DIMENSION = 800;
+const PREVIEW_MAX_DIMENSION = 360;
+const PREVIEW_TARGET_FPS = 8;
+const PREVIEW_MAX_FRAMES = 120;
 const ids = ['pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum','brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum','dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR','jpegQ','jpegQNum','rasterBG'];
 const el = {}; ids.forEach(id=>el[id]=$(id));
 const uploadMessage = $('uploadMessage');
@@ -154,7 +157,8 @@ async function loadImageFile(file){
             width: finalCanvas.width,
             height: finalCanvas.height,
             frames:[{canvas: finalCanvas, delay: 0}],
-            duration: 0
+            duration: 0,
+            preview: null
           };
           updateUploadProgress(1);
           resolve();
@@ -189,7 +193,8 @@ async function loadVideoFile(file){
       width: framesData.width,
       height: framesData.height,
       frames: framesData.frames,
-      duration: framesData.duration
+      duration: framesData.duration,
+      preview: buildPreviewAnimation(framesData.frames, framesData.width, framesData.height, framesData.duration)
     };
     updateUploadProgress(1);
   }finally{
@@ -220,7 +225,16 @@ async function loadGifFile(file){
       updateUploadProgress((i+1)/frameCount);
       if(typeof image.close==='function') image.close();
     }
-    mediaSource={ type:'animation', width: frames[0].canvas.width, height: frames[0].canvas.height, frames, duration: totalDuration };
+    const width = frames[0].canvas.width;
+    const height = frames[0].canvas.height;
+    mediaSource={
+      type:'animation',
+      width,
+      height,
+      frames,
+      duration: totalDuration,
+      preview: buildPreviewAnimation(frames, width, height, totalDuration)
+    };
   }else{
     await loadImageFile(file);
   }
@@ -285,6 +299,45 @@ async function extractVideoFrames(video, maxDim, progressCb){
   return {frames,width:dims.w,height:dims.h,duration:totalDuration};
 }
 
+function buildPreviewAnimation(frames,width,height,duration){
+  if(!frames || !frames.length){
+    return {frames:[], width:0, height:0, duration:0};
+  }
+  const dims=scaleDimensions(width,height,PREVIEW_MAX_DIMENSION);
+  const previewWidth=Math.max(1,dims.w);
+  const previewHeight=Math.max(1,dims.h);
+  const totalDuration = duration || frames.reduce((sum,f)=>sum+Math.max(10, f.delay||100),0);
+  const baseDelay=Math.max(80, Math.round(1000/Math.max(1, PREVIEW_TARGET_FPS)));
+  const countDelay = PREVIEW_MAX_FRAMES && totalDuration
+    ? Math.max(baseDelay, Math.round(totalDuration/Math.max(1, PREVIEW_MAX_FRAMES)))
+    : baseDelay;
+  const sampleDelay=Math.max(baseDelay, countDelay);
+  const previewFrames=[];
+  let elapsed=0;
+  let lastCaptured=0;
+  for(let i=0;i<frames.length;i++){
+    const frame=frames[i];
+    const delay=Math.max(10, frame.delay||100);
+    elapsed+=delay;
+    const isLast = i===frames.length-1;
+    if(!previewFrames.length || (elapsed-lastCaptured)>=sampleDelay || isLast){
+      const canvas=document.createElement('canvas');
+      canvas.width=previewWidth;
+      canvas.height=previewHeight;
+      const ctx=canvas.getContext('2d');
+      ctx.imageSmoothingEnabled=true;
+      ctx.imageSmoothingQuality='high';
+      ctx.drawImage(frame.canvas,0,0,previewWidth,previewHeight);
+      const diff=Math.max(0, Math.round(elapsed-lastCaptured));
+      const previewDelay = Math.max(sampleDelay, diff || sampleDelay);
+      previewFrames.push({canvas, delay: previewDelay});
+      lastCaptured=elapsed;
+    }
+  }
+  const previewDuration = previewFrames.reduce((sum,f)=>sum+Math.max(sampleDelay, f.delay||sampleDelay),0);
+  return {frames:previewFrames, width:previewWidth, height:previewHeight, duration:previewDuration};
+}
+
 function once(target,event){
   return new Promise((resolve,reject)=>{
     const cleanup=()=>{
@@ -329,8 +382,8 @@ function updateExportButtons(){
 }
 
 function getExportDimensions(){
-  const baseW = lastSize.w || 1;
-  const baseH = lastSize.h || 1;
+  const baseW = (mediaSource && mediaSource.width) ? mediaSource.width : (lastSize.w || 1);
+  const baseH = (mediaSource && mediaSource.height) ? mediaSource.height : (lastSize.h || 1);
   const aspect = baseH ? baseW / baseH : 1;
   const maxSide = 3000;
   let outW = parseInt(el.outW.value, 10);
@@ -544,12 +597,13 @@ function buildAnimatedGIF(frames,width,height){
 }
 
 async function exportAnimatedGIF(){
-  if(!lastAnimation || !lastAnimation.svgs || !lastAnimation.svgs.length) throw new Error('Nessuna animazione disponibile');
+  const {svgs, delays} = prepareAnimationExport();
+  if(!svgs.length) throw new Error('Nessuna animazione disponibile');
   const dims=getExportDimensions();
   const bg = el.rasterBG ? el.rasterBG.value : '#ffffff';
-  const canvases=await Promise.all(lastAnimation.svgs.map(svg=>svgToCanvas(svg,dims.width,dims.height,bg)));
-  const delays = lastAnimation.delays && lastAnimation.delays.length===canvases.length ? lastAnimation.delays : new Array(canvases.length).fill(100);
-  const frames=canvases.map((canvas,i)=>({data: canvas.getContext('2d').getImageData(0,0,dims.width,dims.height), delay: delays[i]}));
+  const canvases=await Promise.all(svgs.map(svg=>svgToCanvas(svg,dims.width,dims.height,bg)));
+  const safeDelays = canvases.map((_,i)=>Math.max(10, delays[i]||delays[0]||100));
+  const frames=canvases.map((canvas,i)=>({data: canvas.getContext('2d').getImageData(0,0,dims.width,dims.height), delay: safeDelays[i]}));
   return buildAnimatedGIF(frames,dims.width,dims.height);
 }
 
@@ -585,12 +639,13 @@ async function recordCanvasToVideo(canvases, delays, width, height){
 }
 
 async function exportAnimatedVideo(){
-  if(!lastAnimation || !lastAnimation.svgs || !lastAnimation.svgs.length) throw new Error('Nessuna animazione disponibile');
+  const {svgs, delays} = prepareAnimationExport();
+  if(!svgs.length) throw new Error('Nessuna animazione disponibile');
   const dims=getExportDimensions();
   const bg = el.rasterBG ? el.rasterBG.value : '#ffffff';
-  const canvases=await Promise.all(lastAnimation.svgs.map(svg=>svgToCanvas(svg,dims.width,dims.height,bg)));
-  const delays = lastAnimation.delays && lastAnimation.delays.length===canvases.length ? lastAnimation.delays : new Array(canvases.length).fill(100);
-  return recordCanvasToVideo(canvases, delays, dims.width, dims.height);
+  const canvases=await Promise.all(svgs.map(svg=>svgToCanvas(svg,dims.width,dims.height,bg)));
+  const safeDelays = canvases.map((_,i)=>Math.max(16, delays[i]||delays[0]||100));
+  return recordCanvasToVideo(canvases, safeDelays, dims.width, dims.height);
 }
 
 function wait(ms){
@@ -618,22 +673,25 @@ function clampInt(value, min, max){
 function generate(){
   try{
     const options = collectRenderOptions();
-    const hasFrames = mediaSource && mediaSource.frames && mediaSource.frames.length;
-    if(mediaSource && mediaSource.type==='animation' && hasFrames){
-      const svgs=[];
-      const delays = mediaSource.frames.map(f=>f.delay||100);
-      let size={w:0,h:0};
-      for(const frame of mediaSource.frames){
-        const result = processFrame(frame.canvas, options);
-        svgs.push(result.svg);
-        size = result.size;
-      }
-      lastAnimation={svgs, delays, duration: mediaSource.duration||delays.reduce((a,b)=>a+b,0)};
+    const previewFrames = getPreviewFrames();
+    const hasAnimation = mediaSource && mediaSource.type==='animation' && previewFrames && previewFrames.length;
+    if(hasAnimation){
+      const {svgs,size} = renderFramesToSVGs(previewFrames, options);
+      const delays = getFrameDelays(previewFrames);
+      const previewInfo = mediaSource && mediaSource.preview;
+      const previewDuration = previewInfo && previewInfo.duration ? previewInfo.duration : sumDelays(delays);
+      const fullFrameCount = mediaSource && mediaSource.frames ? mediaSource.frames.length : 0;
+      const isLowQuality = !!(previewInfo && previewInfo.frames && previewInfo.frames.length && (
+        (previewInfo.width && mediaSource && mediaSource.width && previewInfo.width<mediaSource.width) ||
+        (previewInfo.height && mediaSource && mediaSource.height && previewInfo.height<mediaSource.height) ||
+        (fullFrameCount && previewInfo.frames.length < fullFrameCount)
+      ));
+      lastAnimation={svgs, delays, duration: previewDuration, lowQuality: isLowQuality};
       lastSize=size;
       lastSVG=svgs[0]||'';
       renderAnimationPreview(lastAnimation, options.scale);
     }else{
-      const frameCanvas = hasFrames ? mediaSource.frames[0].canvas : null;
+      const frameCanvas = mediaSource && mediaSource.frames && mediaSource.frames.length ? mediaSource.frames[0].canvas : null;
       const result = processFrame(frameCanvas, options);
       lastSVG=result.svg;
       lastSize=result.size;
@@ -833,6 +891,46 @@ function renderStaticPreview(svg, scale=1){
   meta.textContent=`${lastSize.w}×${lastSize.h}px`;
 }
 
+function getPreviewFrames(){
+  if(!mediaSource || !mediaSource.frames || !mediaSource.frames.length) return null;
+  if(mediaSource.type==='animation' && mediaSource.preview && mediaSource.preview.frames && mediaSource.preview.frames.length){
+    return mediaSource.preview.frames;
+  }
+  return mediaSource.frames;
+}
+
+function getFrameDelays(frames){
+  if(!frames || !frames.length) return [];
+  return frames.map(frame=>Math.max(10, Math.round(frame.delay||100)));
+}
+
+function sumDelays(delays){
+  if(!delays || !delays.length) return 0;
+  return delays.reduce((sum,value)=>sum+Math.max(0, Math.round(value||0)),0);
+}
+
+function renderFramesToSVGs(frames, options){
+  const svgs=[];
+  let size={w:1,h:1};
+  if(!frames || !frames.length) return {svgs,size};
+  for(const frame of frames){
+    const result=processFrame(frame.canvas, options);
+    svgs.push(result.svg);
+    size=result.size;
+  }
+  return {svgs,size};
+}
+
+function prepareAnimationExport(){
+  if(!mediaSource || mediaSource.type!=='animation' || !mediaSource.frames || !mediaSource.frames.length){
+    throw new Error('Nessuna animazione disponibile');
+  }
+  const options = collectRenderOptions();
+  const {svgs,size} = renderFramesToSVGs(mediaSource.frames, options);
+  const delays = getFrameDelays(mediaSource.frames);
+  return {svgs, delays, size};
+}
+
 function renderAnimationPreview(animation, scale=1){
   resetAnimationPreview();
   preview.innerHTML='';
@@ -876,7 +974,11 @@ function renderAnimationPreview(animation, scale=1){
     animationTimer=setTimeout(step, firstDelay);
   }
 
-  meta.textContent=`${lastSize.w}×${lastSize.h}px · ${animation.svgs.length} fotogrammi · ${(totalDuration/1000).toFixed(2)}s`;
+  const qualityNote = animation.lowQuality ? ' · Anteprima a bassa qualità' : '';
+  const originalInfo = (mediaSource && mediaSource.width && mediaSource.height && (mediaSource.width!==lastSize.w || mediaSource.height!==lastSize.h))
+    ? ` · Origine ${mediaSource.width}×${mediaSource.height}px`
+    : '';
+  meta.textContent=`${lastSize.w}×${lastSize.h}px · ${animation.svgs.length} fotogrammi · ${(totalDuration/1000).toFixed(2)}s${originalInfo}${qualityNote}`;
 }
 
 let resizeRaf=null;
