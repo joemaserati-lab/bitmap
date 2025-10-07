@@ -8,8 +8,18 @@ const el = {}; ids.forEach(id=>el[id]=$(id));
   const r=$(pair[0]), n=$(pair[1]); if(r&&n){ r.addEventListener('input',()=>{ n.value=r.value; fastRender(); }); n.addEventListener('input',()=>{ r.value=n.value; fastRender(); }); }
 });
 ['dither','invert','bg','fg','style','fmt','dpi','lockAR'].forEach(k=>{ const e=$(k); if(e) e.addEventListener('change',()=>fastRender()); });
-['fileGallery','fileCamera'].forEach(id=>{ const f=$(id); if(f) f.addEventListener('change', async e=>{ if(f.files && f.files[0]) await loadImageFile(f.files[0]); fastRender(); f.value=''; }); });
-const dropzone=document.getElementById('dropzone'); if(dropzone){ dropzone.addEventListener('dragover', e=>e.preventDefault()); dropzone.addEventListener('drop', async e=>{ e.preventDefault(); if(e.dataTransfer.files && e.dataTransfer.files[0]){ await loadImageFile(e.dataTransfer.files[0]); fastRender(); } }); }
+['fileGallery','fileCamera'].forEach(id=>{ const f=$(id); if(f) f.addEventListener('change', async ()=>{ if(f.files && f.files[0]) await loadImageFile(f.files[0]); fastRender(); f.value=''; }); });
+const dropzone=document.getElementById('dropzone');
+const galleryInput=$('fileGallery');
+if(dropzone){
+  const openPicker=()=>{ if(galleryInput) galleryInput.click(); };
+  dropzone.addEventListener('click', openPicker);
+  dropzone.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '||e.key==='Spacebar'){ e.preventDefault(); openPicker(); } });
+  dropzone.addEventListener('dragenter', e=>{ e.preventDefault(); dropzone.classList.add('is-dragover'); });
+  dropzone.addEventListener('dragover', e=>{ e.preventDefault(); dropzone.classList.add('is-dragover'); if(e.dataTransfer) e.dataTransfer.dropEffect='copy'; });
+  dropzone.addEventListener('dragleave', e=>{ const rel=e.relatedTarget; if(!rel || !dropzone.contains(rel)) dropzone.classList.remove('is-dragover'); });
+  dropzone.addEventListener('drop', async e=>{ e.preventDefault(); dropzone.classList.remove('is-dragover'); if(e.dataTransfer.files && e.dataTransfer.files[0]){ await loadImageFile(e.dataTransfer.files[0]); fastRender(); } });
+}
 let img=null, lastSVG='', lastSize={w:800,h:400};
 const work=document.createElement('canvas'); const wctx=work.getContext('2d',{willReadFrequently:true});
 async function loadImageFile(file){ return new Promise(res=>{ const i=new Image(); i.onload=()=>{ img=i; res(); }; i.onerror=()=>{ res(); }; i.src=URL.createObjectURL(file); }); }
