@@ -10,6 +10,7 @@ const el = {}; ids.forEach(id=>el[id]=$(id));
 const uploadMessage = $('uploadMessage');
 const progressWrap = $('uploadProgressWrapper');
 const progressBar = $('uploadProgressBar');
+const previewToggle = $('previewToggle');
 // link sliders and numeric inputs
 [['pixelSize','pixelSizeNum'],['threshold','thresholdNum'],['blur','blurNum'],['grain','grainNum'],['blackPoint','blackPointNum'],['whitePoint','whitePointNum'],['gammaVal','gammaValNum'],['brightness','brightnessNum'],['contrast','contrastNum'],['thickness','thicknessNum'],['scale','scaleNum'],['jpegQ','jpegQNum']].forEach(pair=>{
   const r=$(pair[0]), n=$(pair[1]); if(r&&n){ r.addEventListener('input',()=>{ n.value=r.value; fastRender(); }); n.addEventListener('input',()=>{ r.value=n.value; fastRender(); }); }
@@ -40,6 +41,12 @@ if(dropzone){
     }
   });
 }
+if(previewToggle){
+  previewToggle.addEventListener('click',()=>{
+    if(!lastAnimation || !lastAnimation.svgs || lastAnimation.svgs.length<=1) return;
+    setPreviewPlaying(!previewPlaying);
+  });
+}
 let mediaSource=null;
 let lastSVG='';
 let lastAnimation=null;
@@ -50,13 +57,18 @@ const srcCanvas=document.createElement('canvas');
 const srcCtx=srcCanvas.getContext('2d',{willReadFrequently:true});
 let animationTimer=null;
 let animationFrameIndex=0;
+let previewPlaying=true;
+let currentPreviewAnimation=null;
+let currentPreviewDelays=[];
+let currentPreviewImage=null;
+let currentAnimationMetaBase='';
 
-function resetAnimationPreview(){
+function resetAnimationPreview(resetIndex=true){
   if(animationTimer){
     clearTimeout(animationTimer);
     animationTimer=null;
   }
-  animationFrameIndex=0;
+  if(resetIndex) animationFrameIndex=0;
 }
 function beginUpload(name=''){
   if(uploadMessage) uploadMessage.textContent = name ? `Caricamento di ${name}...` : 'Caricamento in corso...';
@@ -369,16 +381,55 @@ function updateExportButtons(){
     const btn=$(id);
     if(!btn) return;
     const enabled = hasStatic || hasAnimation;
-    btn.disabled = !enabled;
-    btn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    const busy = btn.dataset.busy === 'true';
+    btn.disabled = busy || !enabled;
+    btn.setAttribute('aria-disabled', (!enabled || busy) ? 'true' : 'false');
+    if(busy) btn.setAttribute('aria-busy','true');
+    else btn.removeAttribute('aria-busy');
   });
   ['dlGIF','dlMP4'].forEach(id=>{
     const btn=$(id);
     if(!btn) return;
     const enabled = hasAnimation;
-    btn.disabled = !enabled;
-    btn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    const busy = btn.dataset.busy === 'true';
+    btn.disabled = busy || !enabled;
+    btn.setAttribute('aria-disabled', (!enabled || busy) ? 'true' : 'false');
+    if(busy) btn.setAttribute('aria-busy','true');
+    else btn.removeAttribute('aria-busy');
   });
+}
+
+function setButtonBusy(btn, busy, label){
+  if(!btn) return;
+  if(busy){
+    if(!btn.dataset.originalLabel) btn.dataset.originalLabel = btn.textContent;
+    if(label) btn.textContent = label;
+    btn.dataset.busy='true';
+    btn.disabled=true;
+    btn.setAttribute('aria-busy','true');
+    btn.setAttribute('aria-disabled','true');
+  }else{
+    if(btn.dataset.originalLabel) btn.textContent = btn.dataset.originalLabel;
+    delete btn.dataset.originalLabel;
+    delete btn.dataset.busy;
+    btn.removeAttribute('aria-busy');
+    btn.removeAttribute('aria-disabled');
+  }
+}
+
+async function runAnimationExport(button, busyLabel, work){
+  if(!button || button.dataset.busy === 'true') return null;
+  setButtonBusy(button, true, busyLabel);
+  updateExportButtons();
+  try{
+    return await work();
+  }catch(err){
+    console.error(err);
+    return null;
+  }finally{
+    setButtonBusy(button, false);
+    updateExportButtons();
+  }
 }
 
 function getExportDimensions(){
@@ -601,16 +652,25 @@ async function exportAnimatedGIF(){
   if(!svgs.length) throw new Error('Nessuna animazione disponibile');
   const dims=getExportDimensions();
   const bg = el.rasterBG ? el.rasterBG.value : '#ffffff';
-  const canvases=await Promise.all(svgs.map(svg=>svgToCanvas(svg,dims.width,dims.height,bg)));
-  const safeDelays = canvases.map((_,i)=>Math.max(10, delays[i]||delays[0]||100));
-  const frames=canvases.map((canvas,i)=>({data: canvas.getContext('2d').getImageData(0,0,dims.width,dims.height), delay: safeDelays[i]}));
+  const frames=[];
+  for(let i=0;i<svgs.length;i++){
+    const canvas=await svgToCanvas(svgs[i],dims.width,dims.height,bg);
+    const ctx=canvas.getContext('2d');
+    frames.push({
+      data: ctx.getImageData(0,0,dims.width,dims.height),
+      delay: Math.max(10, delays[i]||delays[0]||100)
+    });
+    if(i%3===0) await wait(0);
+  }
   return buildAnimatedGIF(frames,dims.width,dims.height);
 }
 
-async function recordCanvasToVideo(canvases, delays, width, height){
+async function recordSVGFramesToVideo(svgs, delays, width, height, background){
   if(typeof MediaRecorder==='undefined') throw new Error('MediaRecorder non supportato dal browser');
-  const avgDelay = delays.reduce((sum,v)=>sum+Math.max(16,v||100),0)/delays.length;
-  const fps = Math.max(1, Math.min(30, Math.round(1000/Math.max(16, avgDelay))));
+  const safeDelays=svgs.map((_,i)=>Math.max(16, delays[i]||delays[0]||100));
+  const avgDelay=safeDelays.reduce((sum,v)=>sum+v,0)/safeDelays.length;
+  const fps=Math.max(1, Math.min(30, Math.round(1000/Math.max(16, avgDelay))));
+  const frameInterval=Math.max(16, Math.round(1000/Math.max(1,fps)));
   const canvas=document.createElement('canvas');
   canvas.width=width;
   canvas.height=height;
@@ -619,7 +679,7 @@ async function recordCanvasToVideo(canvases, delays, width, height){
   const mimeCandidates=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
   const mime=mimeCandidates.find(type=>MediaRecorder.isTypeSupported(type));
   if(!mime) throw new Error('Nessun formato video supportato per l\'esportazione');
-  const recorder=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond:6000000});
+  const recorder=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond:4000000});
   const chunks=[];
   const stopped=new Promise((resolve,reject)=>{
     recorder.onstop=resolve;
@@ -627,14 +687,29 @@ async function recordCanvasToVideo(canvases, delays, width, height){
   });
   recorder.ondataavailable=e=>{ if(e.data && e.data.size) chunks.push(e.data); };
   recorder.start();
-  for(let i=0;i<canvases.length;i++){
-    ctx.clearRect(0,0,width,height);
-    ctx.drawImage(canvases[i],0,0,width,height);
-    await wait(Math.max(16, delays[i]||100));
+  let failure=null;
+  try{
+    for(let i=0;i<svgs.length;i++){
+      const raster=await svgToCanvas(svgs[i], width, height, background);
+      const repeats=Math.max(1, Math.round(safeDelays[i]/frameInterval));
+      for(let r=0;r<repeats;r++){
+        ctx.clearRect(0,0,width,height);
+        ctx.drawImage(raster,0,0,width,height);
+        await wait(frameInterval);
+      }
+      if(i%3===0) await wait(0);
+    }
+  }catch(err){
+    failure=err;
   }
-  await wait(Math.max(1000/fps, 30));
-  recorder.stop();
-  await stopped;
+  await wait(frameInterval*2);
+  if(recorder.state!=='inactive') recorder.stop();
+  try{
+    await stopped;
+  }catch(err){
+    if(!failure) failure=err;
+  }
+  if(failure) throw failure;
   return {blob: new Blob(chunks,{type:mime}), mime};
 }
 
@@ -643,9 +718,7 @@ async function exportAnimatedVideo(){
   if(!svgs.length) throw new Error('Nessuna animazione disponibile');
   const dims=getExportDimensions();
   const bg = el.rasterBG ? el.rasterBG.value : '#ffffff';
-  const canvases=await Promise.all(svgs.map(svg=>svgToCanvas(svg,dims.width,dims.height,bg)));
-  const safeDelays = canvases.map((_,i)=>Math.max(16, delays[i]||delays[0]||100));
-  return recordCanvasToVideo(canvases, safeDelays, dims.width, dims.height);
+  return recordSVGFramesToVideo(svgs, delays, dims.width, dims.height, bg);
 }
 
 function wait(ms){
@@ -866,9 +939,14 @@ function computePreviewSize(scale){
 
 function renderStaticPreview(svg, scale=1){
   resetAnimationPreview();
+  currentPreviewAnimation=null;
+  currentPreviewImage=null;
+  currentPreviewDelays=[];
   preview.innerHTML='';
   if(!svg){
-    meta.textContent='';
+    currentAnimationMetaBase='';
+    if(meta) meta.textContent='';
+    updatePreviewToggle();
     return;
   }
   const size = computePreviewSize(scale);
@@ -888,7 +966,9 @@ function renderStaticPreview(svg, scale=1){
     frame.appendChild(node);
   }
   preview.appendChild(frame);
-  meta.textContent=`${lastSize.w}×${lastSize.h}px`;
+  currentAnimationMetaBase='';
+  updateAnimationMetaText();
+  updatePreviewToggle();
 }
 
 function getPreviewFrames(){
@@ -934,8 +1014,13 @@ function prepareAnimationExport(){
 function renderAnimationPreview(animation, scale=1){
   resetAnimationPreview();
   preview.innerHTML='';
+  currentPreviewAnimation=null;
+  currentPreviewImage=null;
+  currentPreviewDelays=[];
   if(!animation || !animation.svgs || !animation.svgs.length){
-    meta.textContent='';
+    currentAnimationMetaBase='';
+    updateAnimationMetaText();
+    updatePreviewToggle();
     return;
   }
   const size = computePreviewSize(scale);
@@ -955,30 +1040,92 @@ function renderAnimationPreview(animation, scale=1){
   const delays = animation.delays && animation.delays.length ? animation.delays : new Array(animation.svgs.length).fill(100);
   const totalDuration = animation.duration || delays.reduce((a,b)=>a+b,0);
 
-  const updateFrame=index=>{
-    const svg = animation.svgs[index];
-    img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
-  };
-
+  currentPreviewAnimation=animation;
+  currentPreviewImage=img;
+  currentPreviewDelays=delays;
   animationFrameIndex=0;
-  updateFrame(animationFrameIndex);
-
-  if(animation.svgs.length>1){
-    const step=()=>{
-      animationFrameIndex=(animationFrameIndex+1)%animation.svgs.length;
-      updateFrame(animationFrameIndex);
-      const delay = Math.max(16, delays[animationFrameIndex] || delays[0] || 100);
-      animationTimer=setTimeout(step, delay);
-    };
-    const firstDelay = Math.max(16, delays[0] || 100);
-    animationTimer=setTimeout(step, firstDelay);
-  }
+  updatePreviewImage(animationFrameIndex);
 
   const qualityNote = animation.lowQuality ? ' · Anteprima a bassa qualità' : '';
   const originalInfo = (mediaSource && mediaSource.width && mediaSource.height && (mediaSource.width!==lastSize.w || mediaSource.height!==lastSize.h))
     ? ` · Origine ${mediaSource.width}×${mediaSource.height}px`
     : '';
-  meta.textContent=`${lastSize.w}×${lastSize.h}px · ${animation.svgs.length} fotogrammi · ${(totalDuration/1000).toFixed(2)}s${originalInfo}${qualityNote}`;
+  currentAnimationMetaBase=`${lastSize.w}×${lastSize.h}px · ${animation.svgs.length} fotogrammi · ${(totalDuration/1000).toFixed(2)}s${originalInfo}${qualityNote}`;
+  updateAnimationMetaText();
+  updatePreviewToggle();
+
+  if(previewPlaying && animation.svgs.length>1){
+    schedulePreviewAdvance();
+  }
+}
+
+function updatePreviewImage(index){
+  if(!currentPreviewAnimation || !currentPreviewImage || !currentPreviewAnimation.svgs || !currentPreviewAnimation.svgs.length) return;
+  const frames=currentPreviewAnimation.svgs;
+  const safeIndex=((index%frames.length)+frames.length)%frames.length;
+  const svg=frames[safeIndex];
+  currentPreviewImage.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+}
+
+function schedulePreviewAdvance(){
+  if(animationTimer){
+    clearTimeout(animationTimer);
+    animationTimer=null;
+  }
+  if(!previewPlaying || !currentPreviewAnimation || !currentPreviewImage) return;
+  if(!currentPreviewAnimation.svgs || currentPreviewAnimation.svgs.length<=1) return;
+  const delays = currentPreviewDelays && currentPreviewDelays.length ? currentPreviewDelays : new Array(currentPreviewAnimation.svgs.length).fill(100);
+  const delayIndex = animationFrameIndex < delays.length ? animationFrameIndex : 0;
+  const waitTime = Math.max(16, delays[delayIndex] || delays[0] || 100);
+  animationTimer=setTimeout(()=>{
+    animationFrameIndex=(animationFrameIndex+1)%currentPreviewAnimation.svgs.length;
+    updatePreviewImage(animationFrameIndex);
+    schedulePreviewAdvance();
+  }, waitTime);
+}
+
+function updateAnimationMetaText(){
+  if(!meta) return;
+  if(currentAnimationMetaBase){
+    const pauseNote = (!previewPlaying && currentPreviewAnimation && currentPreviewAnimation.svgs && currentPreviewAnimation.svgs.length>1) ? ' · Anteprima in pausa' : '';
+    meta.textContent=`${currentAnimationMetaBase}${pauseNote}`;
+  }else if(lastSize && lastSize.w && lastSize.h){
+    meta.textContent=`${lastSize.w}×${lastSize.h}px`;
+  }else{
+    meta.textContent='';
+  }
+}
+
+function updatePreviewToggle(){
+  if(!previewToggle) return;
+  const hasAnimation = !!(lastAnimation && lastAnimation.svgs && lastAnimation.svgs.length>1);
+  previewToggle.hidden = !hasAnimation;
+  previewToggle.setAttribute('aria-hidden', hasAnimation ? 'false' : 'true');
+  previewToggle.disabled = !hasAnimation;
+  previewToggle.setAttribute('aria-disabled', (!hasAnimation).toString());
+  if(!hasAnimation){
+    previewToggle.textContent='RIPRODUCI ANTEPRIMA';
+    return;
+  }
+  previewToggle.textContent = previewPlaying ? 'PAUSA ANTEPRIMA' : 'RIPRODUCI ANTEPRIMA';
+}
+
+function setPreviewPlaying(playing){
+  const next=!!playing;
+  if(previewPlaying===next){
+    if(next && !animationTimer) schedulePreviewAdvance();
+    updatePreviewToggle();
+    updateAnimationMetaText();
+    return;
+  }
+  previewPlaying=next;
+  if(!previewPlaying){
+    resetAnimationPreview(false);
+  }else if(currentPreviewAnimation && currentPreviewAnimation.svgs && currentPreviewAnimation.svgs.length>1){
+    schedulePreviewAdvance();
+  }
+  updatePreviewToggle();
+  updateAnimationMetaText();
 }
 
 let resizeRaf=null;
@@ -1041,10 +1188,10 @@ const gifBtn=$('dlGIF');
 if(gifBtn){
   gifBtn.addEventListener('click',async()=>{
     if(!lastAnimation || !lastAnimation.svgs || !lastAnimation.svgs.length) return;
-    try{
+    await runAnimationExport(gifBtn,'ESPORTO GIF…',async()=>{
       const blob=await exportAnimatedGIF();
-      triggerDownload(blob,'bitmap.gif');
-    }catch(err){ console.error(err); }
+      if(blob) triggerDownload(blob,'bitmap.gif');
+    });
   });
 }
 
@@ -1052,11 +1199,13 @@ const videoBtn=$('dlMP4');
 if(videoBtn){
   videoBtn.addEventListener('click',async()=>{
     if(!lastAnimation || !lastAnimation.svgs || !lastAnimation.svgs.length) return;
-    try{
-      const {blob,mime}=await exportAnimatedVideo();
+    await runAnimationExport(videoBtn,'ESPORTO VIDEO…',async()=>{
+      const result=await exportAnimatedVideo();
+      if(!result) return;
+      const {blob,mime}=result;
       const ext = mime.includes('mp4') ? 'mp4' : (mime.includes('webm') ? 'webm' : 'mp4');
       triggerDownload(blob,`bitmap.${ext}`);
-    }catch(err){ console.error(err); }
+    });
   });
 }
 
