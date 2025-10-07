@@ -30,7 +30,9 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:
 .slider{display:flex;gap:8px;align-items:center}
 .slider input[type='range']{flex:1;height:2px;background:#000;border-radius:4px}
 .num{width:80px;padding:6px;border:1px solid var(--line);border-radius:8px}
-.btn-row{display:flex;gap:8px}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.btn-row + .btn-row{margin-top:6px}
+.btn-row button[disabled]{opacity:0.5;cursor:not-allowed}
 hr{border:0;border-top:1px solid #eee;margin:8px 0}
 .muted{color:var(--muted);font-size:12px}
 @media (max-width:900px){
