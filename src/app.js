@@ -1,127 +1,1160 @@
+const $ = (id) => document.getElementById(id);
 
-const $ = id => document.getElementById(id);
-const preview = $('preview'), meta = $('meta');
-const ids = ['pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum','brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum','dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR','jpegQ','jpegQNum','rasterBG'];
-const el = {}; ids.forEach(id=>el[id]=$(id));
-// link sliders and numeric inputs
-[['pixelSize','pixelSizeNum'],['threshold','thresholdNum'],['blur','blurNum'],['blackPoint','blackPointNum'],['whitePoint','whitePointNum'],['gammaVal','gammaValNum'],['brightness','brightnessNum'],['contrast','contrastNum'],['thickness','thicknessNum'],['scale','scaleNum'],['jpegQ','jpegQNum']].forEach(pair=>{
-  const r=$(pair[0]), n=$(pair[1]); if(r&&n){ r.addEventListener('input',()=>{ n.value=r.value; fastRender(); }); n.addEventListener('input',()=>{ r.value=n.value; fastRender(); }); }
-});
-['dither','invert','bg','fg','style','fmt','dpi','lockAR'].forEach(k=>{ const e=$(k); if(e) e.addEventListener('change',()=>fastRender()); });
-['fileGallery','fileCamera'].forEach(id=>{ const f=$(id); if(f) f.addEventListener('change', async e=>{ if(f.files && f.files[0]) await loadImageFile(f.files[0]); fastRender(); f.value=''; }); });
-const dropzone=document.getElementById('dropzone'); if(dropzone){ dropzone.addEventListener('dragover', e=>e.preventDefault()); dropzone.addEventListener('drop', async e=>{ e.preventDefault(); if(e.dataTransfer.files && e.dataTransfer.files[0]){ await loadImageFile(e.dataTransfer.files[0]); fastRender(); } }); }
-let img=null, lastSVG='', lastSize={w:800,h:400};
-const work=document.createElement('canvas'); const wctx=work.getContext('2d',{willReadFrequently:true});
-async function loadImageFile(file){ return new Promise(res=>{ const i=new Image(); i.onload=()=>{ img=i; res(); }; i.onerror=()=>{ res(); }; i.src=URL.createObjectURL(file); }); }
+const preview = $('preview');
+const meta = $('meta');
+const uploadMessage = $('uploadMessage');
+const progressWrap = $('uploadProgressWrapper');
+const progressBar = $('uploadProgressBar');
 
-// throttle with rAF for faster live preview
-let ticking=false;
-function fastRender(){ if(ticking) return; ticking=true; requestAnimationFrame(()=>{ generate(); ticking=false; }); }
+const CONTROL_IDS = [
+  'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum',
+  'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
+  'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
+  'dither','invert','bg','fg','scale','scaleNum','fmt','dpi','outW','outH','lockAR',
+  'jpegQ','jpegQNum','rasterBG'
+];
 
-function generate(){
-  try{
-    const px = clampInt(el.pixelSize.value||10,2,200);
-    const thr = clampInt(el.threshold.value||180,0,255);
-    const blurPx = Math.max(0, parseFloat(el.blur.value||0));
-    const bp = clampInt(el.blackPoint.value||0,0,255);
-    const wp = clampInt(el.whitePoint.value||255,1,255);
-    const gam = Math.max(0.1, Math.min(3, parseFloat(el.gammaVal.value||1)));
-    const bri = Math.max(-100, Math.min(100, parseInt(el.brightness.value||'0',10)));
-    const con = Math.max(-100, Math.min(100, parseInt(el.contrast.value||'0',10)));
-    const style = el.style.value||'solid';
-    const thick = clampInt(el.thickness.value||2,1,6);
-    const mode = el.dither.value||'none';
-    const invertMode = el.invert.value||'auto';
-    const bg = el.bg.value||'#fff'; const fg = el.fg.value||'#000';
+const controls = {};
+for(const id of CONTROL_IDS){
+  controls[id] = $(id);
+}
 
-    // source canvas
-    const src = document.createElement('canvas'); let sctx = src.getContext('2d');
-    if(img){ src.width = img.naturalWidth; src.height = img.naturalHeight; sctx.filter = blurPx>0?`blur(${blurPx}px)`:'none'; sctx.drawImage(img,0,0); sctx.filter='none'; }
-    else { src.width = 800; src.height = 400; sctx.fillStyle='#fff'; sctx.fillRect(0,0,src.width,src.height); sctx.fillStyle='#000'; sctx.font='700 140px JetBrains Mono'; sctx.fillText('Aa',20,160); }
+const MAX_UPLOAD_DIMENSION = 800;
+const RENDER_DEBOUNCE_MS = 90;
 
-    const gridW = Math.max(1, Math.round(src.width/px)), gridH = Math.max(1, Math.round(src.height/px));
-    work.width = gridW; work.height = gridH; wctx.clearRect(0,0,gridW,gridH); wctx.drawImage(src,0,0,gridW,gridH);
-    const d = wctx.getImageData(0,0,gridW,gridH).data;
-    const gray = new Float32Array(gridW*gridH); let sum=0;
-    for(let i=0,p=0;i<d.length;i+=4,p++){ const l=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; gray[p]=l; sum+=l; }
-    const avg = sum/(gridW*gridH);
-    // tonal mapping (black/white/gamma/brightness/contrast)
-    for(let p=0;p<gray.length;p++) gray[p]=applyTonal(gray[p], bp, wp, gam, bri, con);
+const OFFSCREEN_SUPPORTED = typeof OffscreenCanvas !== 'undefined';
 
-    let invert=false; if(invertMode==='yes') invert=true; else if(invertMode==='no') invert=false; else invert = avg>128;
+const state = {
+  sourceCanvas: null,
+  sourceName: '',
+  sourceWidth: 0,
+  sourceHeight: 0,
+  sourceVersion: 0,
+  worker: null,
+  workerReady: false,
+  workerReadyPromise: null,
+  workerReadyResolve: null,
+  workerSourceVersion: 0,
+  pendingSourcePromise: null,
+  pendingSourceVersion: 0,
+  pendingSourceResolvers: null,
+  pendingJobs: new Map(),
+  currentJobId: 0,
+  lastResult: null,
+  lastPreview: null,
+  lastSVG: '',
+  lastSize: {width: 0, height: 0},
+  lastScale: 1,
+  asciiCache: null,
+  offscreenSupported: OFFSCREEN_SUPPORTED,
+  sourceOffscreen: null
+};
 
-    let mask;
-    if(mode==='none') mask = thresholdMask(gray,gridW,gridH,thr,invert);
-    else if(mode.startsWith('ascii')) { /* handled below */ mask = null; }
-    else if(mode==='bayer4'||mode==='bayer8'||mode==='cross') mask = orderedDither(gray,gridW,gridH,thr,invert,mode);
-    else mask = errorDiffuse(gray,gridW,gridH,thr,invert,mode);
+let renderQueued = false;
+let renderTimer = null;
+let renderRaf = 0;
+let renderBusy = false;
 
-    let outMask = mask;
-    if(style==='outline' && mask) outMask = boundary(mask,gridW,gridH,thick);
-    else if(style==='ring' && mask){ const dil=dilate(mask,gridW,gridH,thick), ero=erode(mask,gridW,gridH,thick); outMask=subtract(dil,ero); }
+function init(){
+  initWorker();
+  bindControls();
+  bindFileInputs();
+  bindDropzone();
+  window.addEventListener('resize', () => {
+    if(!state.lastSVG) return;
+    schedulePreviewRefresh();
+  });
+  setSourceCanvas(getPlaceholderCanvas(), '');
+  fastRender(true);
+}
 
-    // ASCII modes
-    if(mode.startsWith('ascii')){
-      lastSVG = buildASCII(gray, gridW, gridH, px, bg, fg, mode);
-    } else {
-      lastSVG = buildSVG(outMask, gridW, gridH, px, bg, fg);
+function initWorker(){
+  if(state.worker) return;
+  const worker = new Worker(new URL('./worker/processor.js', import.meta.url), {type:'module'});
+  state.worker = worker;
+  state.workerReadyPromise = new Promise((resolve) => {
+    state.workerReadyResolve = resolve;
+  });
+  worker.onmessage = handleWorkerMessage;
+  worker.onerror = (err) => {
+    console.error('Worker error', err);
+  };
+}
+
+function handleWorkerMessage(event){
+  const data = event.data || {};
+  if(data.type === 'ready'){
+    state.workerReady = true;
+    if(state.workerReadyResolve){
+      state.workerReadyResolve();
+      state.workerReadyResolve = null;
     }
-    lastSize = { w: Math.round(gridW*px), h: Math.round(gridH*px) };
-    renderPreview(lastSVG, parseFloat(el.scale.value||1));
-  }catch(e){ console.error(e); }
+    return;
+  }
+  if(data.type === 'source-loaded'){
+    const {version} = data;
+    if(state.pendingSourcePromise && state.pendingSourceVersion === version){
+      state.workerSourceVersion = version;
+      const {resolve} = state.pendingSourceResolvers || {};
+      state.pendingSourceResolvers = null;
+      state.pendingSourcePromise = null;
+      if(resolve) resolve();
+    }else if(version > state.workerSourceVersion){
+      state.workerSourceVersion = version;
+    }
+    return;
+  }
+  if(data.type === 'result'){
+    const {jobId} = data;
+    const entry = state.pendingJobs.get(jobId);
+    if(entry){
+      state.pendingJobs.delete(jobId);
+      entry.resolve(data);
+    }
+    return;
+  }
+  if(data.type === 'error'){
+    const {jobId, message} = data;
+    if(jobId && state.pendingJobs.has(jobId)){
+      const entry = state.pendingJobs.get(jobId);
+      state.pendingJobs.delete(jobId);
+      entry.reject(new Error(message||'Worker error'));
+    }else{
+      console.error('Worker error', message);
+    }
+  }
 }
 
-function applyTonal(l,bp,wp,gamma,bright,contrast){
-  let L = l + (bright|0);
-  const c = Math.max(-100, Math.min(100, parseFloat(contrast)||0));
-  L = (L - 128) * (1 + c/100) + 128;
-  wp = Math.max(bp+1, wp);
-  let n = (L - bp) / (wp - bp); if(n<0) n=0; else if(n>1) n=1;
-  const g = Math.max(0.1, parseFloat(gamma)||1); if(Math.abs(g-1)>1e-3) n = Math.pow(n, 1/g);
-  return Math.max(0, Math.min(255, Math.round(n*255)));
+function bindControls(){
+  const sliderPairs = [
+    ['pixelSize','pixelSizeNum'],
+    ['threshold','thresholdNum'],
+    ['blur','blurNum'],
+    ['grain','grainNum'],
+    ['blackPoint','blackPointNum'],
+    ['whitePoint','whitePointNum'],
+    ['gammaVal','gammaValNum'],
+    ['brightness','brightnessNum'],
+    ['contrast','contrastNum'],
+    ['thickness','thicknessNum'],
+    ['scale','scaleNum'],
+    ['jpegQ','jpegQNum']
+  ];
+  for(const [rangeId, numberId] of sliderPairs){
+    const rangeEl = controls[rangeId];
+    const numberEl = controls[numberId];
+    if(!rangeEl || !numberEl) continue;
+    rangeEl.addEventListener('input', () => {
+      numberEl.value = rangeEl.value;
+      fastRender();
+    });
+    numberEl.addEventListener('input', () => {
+      rangeEl.value = numberEl.value;
+      fastRender();
+    });
+  }
+  const changeIds = ['dither','invert','bg','fg','style','fmt','dpi','lockAR'];
+  for(const id of changeIds){
+    const el = controls[id];
+    if(!el) continue;
+    el.addEventListener('change', () => fastRender());
+  }
 }
 
-function thresholdMask(gray,w,h,thr,invert){ const out=new Uint8Array(w*h); for(let i=0;i<out.length;i++){ const v = invert ? (gray[i] > thr) : (gray[i] < thr); out[i]=v?1:0; } return out; }
-
-function orderedDither(gray,w,h,thr,invert,mode){
-  // bayer 4 & 8 implemented, cross simple pattern
-  if(mode==='bayer4'){ const M=[[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]], N=16; const out=new Uint8Array(w*h); for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const i=y*w+x; const t=(M[y%4][x%4]+0.5)/N; const g=(gray[i]-thr)/255+0.5; out[i]=(g<t)?1:0; } } return out; }
-  if(mode==='bayer8'){ /* simplified reuse bayer4 for speed */ return orderedDither(gray,w,h,thr,invert,'bayer4'); }
-  if(mode==='cross'){ const out=new Uint8Array(w*h); for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const i=y*w+x; out[i] = ((x+y)%2===0)?1:0; } } return out; }
-  return thresholdMask(gray,w,h,thr,invert);
+function bindFileInputs(){
+  ['fileGallery','fileCamera'].forEach((id) => {
+    const input = $(id);
+    if(!input) return;
+    input.addEventListener('change', async () => {
+      if(input.files && input.files[0]){
+        await handleFile(input.files[0]);
+        input.value = '';
+      }
+    });
+  });
 }
 
-function errorDiffuse(gray,w,h,thr,invert,method){
-  const buf=new Float32Array(gray); const out=new Uint8Array(w*h);
-  const kernels={ fs:{div:16,taps:[{dx:1,dy:0,w:7},{dx:-1,dy:1,w:3},{dx:0,dy:1,w:5},{dx:1,dy:1,w:1}]}, atkinson:{div:8,taps:[{dx:1,dy:0,w:1},{dx:2,dy:0,w:1},{dx:-1,dy:1,w:1},{dx:0,dy:1,w:1},{dx:1,dy:1,w:1},{dx:0,dy:2,w:1}]}, jjn:{div:48,taps:[{dx:1,dy:0,w:7},{dx:2,dy:0,w:5},{dx:-2,dy:1,w:3},{dx:-1,dy:1,w:5},{dx:0,dy:1,w:7},{dx:1,dy:1,w:5},{dx:2,dy:1,w:3},{dx:-2,dy:2,w:1},{dx:-1,dy:2,w:3},{dx:0,dy:2,w:5},{dx:1,dy:2,w:3},{dx:2,dy:2,w:1}]}, stucki:{div:42,taps:[{dx:1,dy:0,w:8},{dx:2,dy:0,w:4},{dx:-2,dy:1,w:2},{dx:-1,dy:1,w:4},{dx:0,dy:1,w:8},{dx:1,dy:1,w:4},{dx:2,dy:1,w:2},{dx:-2,dy:2,w:1},{dx:-1,dy:2,w:2},{dx:0,dy:2,w:4},{dx:1,dy:2,w:2},{dx:2,dy:2,w:1}]}, burkes:{div:32,taps:[{dx:1,dy:0,w:8},{dx:2,dy:0,w:4},{dx:-2,dy:1,w:2},{dx:-1,dy:1,w:4},{dx:0,dy:1,w:8},{dx:1,dy:1,w:4},{dx:2,dy:1,w:2}]}, sierra2:{div:32,taps:[{dx:1,dy:0,w:4},{dx:2,dy:0,w:3},{dx:-2,dy:1,w:1},{dx:-1,dy:1,w:2},{dx:0,dy:1,w:3},{dx:1,dy:1,w:2},{dx:2,dy:1,w:1}]} };
-  const k = kernels[method]||kernels.fs;
-  for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const i=y*w+x; const old=buf[i]; const on = invert ? (old>thr) : (old<thr); out[i]=on?1:0; const target = on?0:255; const err = old-target; for(const t of k.taps){ const xx=x+t.dx, yy=y+t.dy; if(xx<0||xx>=w||yy<0||yy>=h) continue; buf[yy*w+xx] += err*(t.w/k.div); } } } return out;
+function bindDropzone(){
+  const dropzone = $('dropzone');
+  const gallery = $('fileGallery');
+  if(!dropzone) return;
+  dropzone.addEventListener('click', () => {
+    if(gallery) gallery.click();
+  });
+  dropzone.addEventListener('keydown', (event) => {
+    if(event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar'){
+      event.preventDefault();
+      if(gallery) gallery.click();
+    }
+  });
+  dropzone.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+    dropzone.classList.add('is-dragover');
+  });
+  dropzone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    dropzone.classList.add('is-dragover');
+    if(event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+  dropzone.addEventListener('dragleave', (event) => {
+    const rel = event.relatedTarget;
+    if(!rel || !dropzone.contains(rel)){
+      dropzone.classList.remove('is-dragover');
+    }
+  });
+  dropzone.addEventListener('drop', async (event) => {
+    event.preventDefault();
+    dropzone.classList.remove('is-dragover');
+    if(event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0]){
+      await handleFile(event.dataTransfer.files[0]);
+    }
+  });
 }
 
-function erode(mask,w,h,r=1){ let out = mask.slice(); for(let it=0; it<r; it++){ const next=new Uint8Array(w*h); for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ let keep=1; for(let dy=-1; dy<=1; dy++){ for(let dx=-1; dx<=1; dx++){ const xx=x+dx, yy=y+dy; if(xx<0||yy<0||xx>=w||yy>=h){ keep=0; break; } if(out[yy*w+xx]===0){ keep=0; break; } } if(!keep) break; } next[y*w+x]=keep?1:0; } } out=next; } return out; }
-function dilate(mask,w,h,r=1){ let out=mask.slice(); for(let it=0;it<r;it++){ const next=new Uint8Array(w*h); for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ let on=out[y*w+x]; if(on){ next[y*w+x]=1; continue; } for(let dy=-1; dy<=1; dy++){ for(let dx=-1; dx<=1; dx++){ const xx=x+dx, yy=y+dy; if(xx<0||yy<0||xx>=w||yy>=h) continue; if(out[yy*w+xx]){ on=1; break; } } if(on) break; } next[y*w+x]=on?1:0; } } out=next; } return out; }
-function boundary(mask,w,h,t=1){ const dil=dilate(mask,w,h,t), ero=erode(mask,w,h,t); const out=new Uint8Array(w*h); for(let i=0;i<out.length;i++) out[i]=(dil[i]&&!ero[i])?1:0; return out; }
-function subtract(a,b){ const out=new Uint8Array(a.length); for(let i=0;i<a.length;i++) out[i]=a[i]&&!b[i]?1:0; return out; }
-
-function buildSVG(mask,w,h,px,bg,fg){ const tile=px, svgW=Math.round(w*tile), svgH=Math.round(h*tile); let svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`; if(bg) svg+=`<rect width="100%" height="100%" fill="${bg}"/>`; svg+=`<g fill="${fg}">`; for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ if(mask[y*w+x]) svg+=`<rect x="${x*tile}" y="${y*tile}" width="${tile}" height="${tile}"/>`; } } svg+=`</g></svg>`; return svg; }
-
-function buildASCII(gray,w,h,px,bg,fg,mode){
-  const sets={ ascii_simple:[' ','.',':','-','=','+','#','@'], ascii_unicode8:[' ','·',':','-','=','+','*','#','%','@'], ascii_chinese:['　','丶','丿','ノ','乙','人','口','回','田','国'] };
-  const charset = sets[mode]||sets['ascii_simple'];
-  const svgW=Math.round(w*px), svgH=Math.round(h*px);
-  let svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
-  if(bg) svg+=`<rect width="100%" height="100%" fill="${bg}"/>`;
-  svg+=`<g fill="${fg}" font-family="JetBrains Mono, monospace" font-size="${px}" text-anchor="middle">`;
-  for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const v=gray[y*w+x]; const idx=Math.floor((v/255)*(charset.length-1)); const ch=charset[charset.length-1-idx]; const cx=Math.round(x*px + px/2), cy=Math.round(y*px + px*0.85); svg+=`<text x="${cx}" y="${cy}">${ch}</text>`; } }
-  svg+=`</g></svg>`; return svg;
+function beginUpload(name=''){
+  if(uploadMessage){
+    uploadMessage.textContent = name ? `Caricamento di ${name}...` : 'Caricamento in corso...';
+  }
+  if(progressWrap){
+    progressWrap.hidden = false;
+    progressWrap.removeAttribute('hidden');
+    progressWrap.classList.remove('is-indeterminate');
+    progressWrap.setAttribute('aria-valuenow','0');
+    progressWrap.setAttribute('aria-valuetext','0%');
+  }
+  if(progressBar){
+    progressBar.style.width = '0%';
+  }
 }
 
-function renderPreview(svg,scale=1){ preview.innerHTML=''; const wrapper=document.createElement('div'); wrapper.innerHTML=svg; const node=wrapper.firstChild; node.style.transformOrigin='top left'; node.style.transform=`scale(${scale})`; preview.appendChild(node); meta.textContent=`${lastSize.w}×${lastSize.h}px`; }
+function updateUploadProgress(value){
+  if(!progressWrap || !progressBar) return;
+  progressWrap.classList.remove('is-indeterminate');
+  const pct = Math.max(0, Math.min(1, value||0));
+  const percentText = `${Math.round(pct*100)}%`;
+  progressBar.style.width = percentText;
+  progressWrap.setAttribute('aria-valuenow', String(Math.round(pct*100)));
+  progressWrap.setAttribute('aria-valuetext', percentText);
+}
 
-// EXPORT (simple)
-document.getElementById('dlSVG').addEventListener('click', ()=>{ if(!lastSVG) return; const blob=new Blob([lastSVG],{type:'image/svg+xml'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='bitmap.svg'; a.click(); });
-document.getElementById('dlPNG').addEventListener('click', ()=>{ if(!lastSVG) return; const img=new Image(); img.onload=()=>{ const c=document.createElement('canvas'); c.width=lastSize.w; c.height=lastSize.h; const cx=c.getContext('2d'); cx.fillStyle=el.rasterBG.value||'#fff'; cx.fillRect(0,0,c.width,c.height); cx.drawImage(img,0,0); c.toBlob(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='bitmap.png'; a.click(); }); }; img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(lastSVG); });
-document.getElementById('dlJPG').addEventListener('click', ()=>{ if(!lastSVG) return; const img=new Image(); img.onload=()=>{ const c=document.createElement('canvas'); c.width=lastSize.w; c.height=lastSize.h; const cx=c.getContext('2d'); cx.fillStyle=el.rasterBG.value||'#fff'; cx.fillRect(0,0,c.width,c.height); cx.drawImage(img,0,0); c.toBlob(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='bitmap.jpg'; a.click(); }, 'image/jpeg', parseFloat(el.jpegQ.value||0.9)); }; img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(lastSVG); });
+function setUploadIndeterminate(){
+  if(!progressWrap || !progressBar) return;
+  progressWrap.hidden = false;
+  progressWrap.removeAttribute('hidden');
+  progressWrap.classList.add('is-indeterminate');
+  progressBar.style.width = '40%';
+  progressWrap.removeAttribute('aria-valuenow');
+  progressWrap.setAttribute('aria-valuetext','Caricamento in corso');
+}
 
-// initial render
-fastRender();
+function finishUpload(name=''){
+  if(progressWrap){
+    progressWrap.hidden = true;
+    progressWrap.classList.remove('is-indeterminate');
+    progressWrap.setAttribute('aria-valuenow','100');
+    progressWrap.setAttribute('aria-valuetext','Completato');
+  }
+  if(uploadMessage){
+    const dimsInfo = state.sourceWidth && state.sourceHeight
+      ? ` (${state.sourceWidth}×${state.sourceHeight}px)`
+      : '';
+    uploadMessage.textContent = name ? `File presente: ${name}${dimsInfo}` : `File presente${dimsInfo}`;
+  }
+}
+
+function uploadError(message='Errore durante il caricamento'){
+  if(uploadMessage){
+    uploadMessage.textContent = message;
+  }
+  if(progressWrap){
+    progressWrap.hidden = true;
+    progressWrap.classList.remove('is-indeterminate');
+    progressWrap.setAttribute('aria-valuenow','0');
+    progressWrap.setAttribute('aria-valuetext','Errore');
+  }
+}
+
+async function handleFile(file){
+  if(!file) return;
+  beginUpload(file.name||'');
+  try{
+    const type = (file.type||'').toLowerCase();
+    if(!type.startsWith('image/')){
+      throw new Error('Formato file non supportato');
+    }
+    const canvas = await readImageFileToCanvas(file);
+    setSourceCanvas(canvas, file.name||'');
+    finishUpload(file.name||'');
+    fastRender(true);
+  }catch(err){
+    console.error(err);
+    uploadError(err && err.message ? err.message : 'Errore durante il caricamento');
+  }
+}
+
+async function readImageFileToCanvas(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if(event.lengthComputable){
+        updateUploadProgress(event.loaded/event.total);
+      }else{
+        setUploadIndeterminate();
+      }
+    };
+    reader.onerror = () => reject(reader.error||new Error('Errore durante la lettura del file'));
+    reader.onload = () => {
+      const image = new Image();
+      image.onload = () => {
+        try{
+          const canvas = rasterizeImageToCanvas(image, MAX_UPLOAD_DIMENSION);
+          resolve(canvas);
+        }catch(e){
+          reject(e);
+        }
+      };
+      image.onerror = () => reject(new Error('Impossibile caricare l\'immagine'));
+      if(typeof reader.result === 'string'){
+        image.src = reader.result;
+      }else{
+        reject(new Error('Formato file non supportato'));
+      }
+    };
+    try{
+      reader.readAsDataURL(file);
+    }catch(err){
+      reject(err);
+    }
+  });
+}
+
+function scaleDimensions(width, height, maxDim){
+  const maxSide = Math.max(width, height);
+  if(maxSide <= maxDim){
+    return {width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height))};
+  }
+  const scale = maxDim / maxSide;
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale))
+  };
+}
+
+function rasterizeImageToCanvas(image, maxDim){
+  const dims = scaleDimensions(image.naturalWidth || image.width, image.naturalHeight || image.height, maxDim);
+  const canvas = document.createElement('canvas');
+  canvas.width = dims.width;
+  canvas.height = dims.height;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function setSourceCanvas(canvas, name){
+  state.sourceCanvas = canvas;
+  state.sourceName = name;
+  state.sourceWidth = canvas.width;
+  state.sourceHeight = canvas.height;
+  state.asciiCache = null;
+  state.lastPreview = null;
+  state.lastSVG = '';
+  state.lastSize = {width: 0, height: 0};
+  state.lastScale = 1;
+  if(state.offscreenSupported){
+    try{
+      const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
+      const offctx = offscreen.getContext('2d', {alpha:false});
+      offctx.drawImage(canvas, 0, 0);
+      state.sourceOffscreen = offscreen;
+    }catch(err){
+      state.sourceOffscreen = null;
+      state.offscreenSupported = false;
+    }
+  }else{
+    state.sourceOffscreen = null;
+  }
+  state.sourceVersion++;
+  state.workerSourceVersion = 0;
+}
+
+async function ensureWorkerReady(){
+  if(!state.worker){
+    initWorker();
+  }
+  if(state.workerReady){
+    return;
+  }
+  if(state.workerReadyPromise){
+    await state.workerReadyPromise;
+  }
+}
+
+async function ensureWorkerSource(canvas){
+  await ensureWorkerReady();
+  if(state.workerSourceVersion === state.sourceVersion){
+    return;
+  }
+  if(state.pendingSourcePromise && state.pendingSourceVersion === state.sourceVersion){
+    await state.pendingSourcePromise;
+    return;
+  }
+  const version = state.sourceVersion;
+  state.pendingSourceVersion = version;
+  state.pendingSourcePromise = new Promise((resolve, reject) => {
+    state.pendingSourceResolvers = {resolve, reject};
+  });
+  if(state.offscreenSupported && state.sourceOffscreen){
+    const offscreen = state.sourceOffscreen;
+    state.sourceOffscreen = null;
+    state.worker.postMessage({
+      type: 'load-source',
+      version,
+      width: canvas.width,
+      height: canvas.height,
+      offscreen
+    }, [offscreen]);
+  }else{
+    const bitmap = await createImageBitmap(canvas);
+    state.worker.postMessage({
+      type: 'load-source',
+      version,
+      width: canvas.width,
+      height: canvas.height,
+      image: bitmap
+    }, [bitmap]);
+  }
+  await state.pendingSourcePromise;
+}
+
+function fastRender(immediate=false){
+  renderQueued = true;
+  if(renderBusy){
+    return;
+  }
+  if(immediate){
+    if(renderTimer){
+      clearTimeout(renderTimer);
+      renderTimer = null;
+    }
+    if(renderRaf){
+      cancelAnimationFrame(renderRaf);
+    }
+    renderRaf = requestAnimationFrame(() => {
+      runRenderCycle();
+    });
+    return;
+  }
+  if(renderTimer){
+    clearTimeout(renderTimer);
+  }
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    if(renderRaf){
+      cancelAnimationFrame(renderRaf);
+    }
+    renderRaf = requestAnimationFrame(() => {
+      runRenderCycle();
+    });
+  }, RENDER_DEBOUNCE_MS);
+}
+
+async function runRenderCycle(){
+  renderRaf = 0;
+  if(renderBusy) return;
+  if(!renderQueued) return;
+  renderQueued = false;
+  renderBusy = true;
+  updateExportButtons();
+  try{
+    await generate();
+  }catch(err){
+    console.error(err);
+  }finally{
+    renderBusy = false;
+    updateExportButtons();
+    if(renderQueued){
+      fastRender();
+    }
+  }
+}
+
+function clampInt(value, min, max){
+  const parsed = parseInt(value, 10);
+  if(Number.isNaN(parsed)) return min;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function collectRenderOptions(){
+  const px = clampInt(controls.pixelSize.value||10, 2, 200);
+  const thr = clampInt(controls.threshold.value||180, 0, 255);
+  const blurPx = Math.max(0, parseFloat(controls.blur.value||'0'));
+  const grain = Math.max(0, Math.min(100, parseInt(controls.grain.value||'0',10)));
+  const bp = clampInt(controls.blackPoint.value||0, 0, 255);
+  const wp = clampInt(controls.whitePoint.value||255, 1, 255);
+  const gam = Math.max(0.1, Math.min(3, parseFloat(controls.gammaVal.value||'1')));
+  const bri = Math.max(-100, Math.min(100, parseInt(controls.brightness.value||'0',10)));
+  const con = Math.max(-100, Math.min(100, parseInt(controls.contrast.value||'0',10)));
+  const style = controls.style.value||'solid';
+  const thick = clampInt(controls.thickness.value||2,1,6);
+  const mode = controls.dither.value||'none';
+  const invertMode = controls.invert.value||'auto';
+  const bg = controls.bg.value||'#ffffff';
+  const fg = controls.fg.value||'#000000';
+  const scaleVal = parseFloat(controls.scale.value||'1');
+  const scale = Number.isFinite(scaleVal) && scaleVal>0 ? scaleVal : 1;
+  return {px, thr, blurPx, grain, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale};
+}
+
+async function generate(){
+  const options = collectRenderOptions();
+  const canvas = state.sourceCanvas || getPlaceholderCanvas();
+  await ensureWorkerSource(canvas);
+  const jobId = ++state.currentJobId;
+  const payload = {
+    type: 'process',
+    jobId,
+    options: {
+      pixelSize: options.px,
+      threshold: options.thr,
+      blur: options.blurPx,
+      grain: options.grain,
+      blackPoint: options.bp,
+      whitePoint: options.wp,
+      gamma: options.gam,
+      brightness: options.bri,
+      contrast: options.con,
+      style: options.style,
+      thickness: options.thick,
+      dither: options.mode,
+      invertMode: options.invertMode
+    }
+  };
+  const result = await requestWorkerProcess(payload);
+  if(!result || result.jobId !== jobId) return;
+  state.lastResult = {options, data: result};
+  const previewData = buildSVGFromResult(result, options);
+  state.lastPreview = previewData;
+  state.lastSVG = previewData.svgString;
+  state.lastSize = {width: previewData.width, height: previewData.height};
+  state.lastScale = options.scale;
+  renderPreview(previewData, options.scale);
+  updateMeta(state.lastSize.width, state.lastSize.height);
+  updateExportButtons();
+}
+
+function requestWorkerProcess(message){
+  return new Promise((resolve, reject) => {
+    const {jobId} = message;
+    if(!state.worker){
+      reject(new Error('Worker non inizializzato'));
+      return;
+    }
+    state.pendingJobs.set(jobId, {resolve, reject});
+    try{
+      state.worker.postMessage(message);
+    }catch(err){
+      state.pendingJobs.delete(jobId);
+      reject(err);
+    }
+  });
+}
+
+function buildSVGFromResult(result, options){
+  if(!result){
+    state.asciiCache = null;
+    return {svgString:'', svgElement:null, width:0, height:0, mode:null};
+  }
+  const {gridWidth, gridHeight, mode, mask, tonal, ascii} = result;
+  const tile = options.px;
+  const width = Math.round(gridWidth * tile);
+  const height = Math.round(gridHeight * tile);
+  if(mode && mode.startsWith('ascii')){
+    const svgElement = getAsciiSVGElement(result, options);
+    const svgString = buildASCIISVGString(ascii, tonal, gridWidth, gridHeight, tile, options.bg, options.fg, mode);
+    return {svgString, svgElement, width, height, mode};
+  }
+  state.asciiCache = null;
+  const svgString = buildMaskSVGString(mask, gridWidth, gridHeight, tile, options.bg, options.fg);
+  return {svgString, svgElement:null, width, height, mode};
+}
+
+function buildMaskSVGString(mask, width, height, tile, bg, fg){
+  if(!mask) return '';
+  const svgW = Math.round(width*tile);
+  const svgH = Math.round(height*tile);
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(bg) svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
+  svg += `<g fill="${fg}">`;
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      if(mask[y*width+x]){
+        svg += `<rect x="${x*tile}" y="${y*tile}" width="${tile}" height="${tile}"/>`;
+      }
+    }
+  }
+  svg += '</g></svg>';
+  return svg;
+}
+
+const ASCII_SETS = {
+  ascii_simple: [' ','.',':','-','=','+','#','@'],
+  ascii_unicode8: [' ','·',':','-','=','+','*','#','%','@'],
+  ascii_chinese: ['　','丶','丿','ノ','乙','人','口','回','田','国']
+};
+
+function buildASCIISVGString(ascii, tonal, width, height, tile, bg, fg, mode){
+  const charset = ASCII_SETS[mode] || ASCII_SETS.ascii_simple;
+  const svgW = Math.round(width*tile);
+  const svgH = Math.round(height*tile);
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(bg) svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
+  svg += `<g fill="${fg}" font-family="JetBrains Mono, monospace" font-size="${tile}" text-anchor="middle">`;
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      const idx = y*width+x;
+      const tone = tonal ? tonal[idx] : 0;
+      const charIndex = ascii ? ascii[idx] : Math.round((charset.length-1)*(1 - tone/255));
+      const ch = charset[Math.max(0, Math.min(charset.length-1, charIndex))];
+      const cx = Math.round(x*tile + tile/2);
+      const cy = Math.round(y*tile + tile*0.82);
+      svg += `<text x="${cx}" y="${cy}">${ch}</text>`;
+    }
+  }
+  svg += '</g></svg>';
+  return svg;
+}
+
+function getAsciiSVGElement(result, options){
+  const cols = result.gridWidth;
+  const rows = result.gridHeight;
+  const mode = result.mode || 'ascii_simple';
+  const tile = Math.max(1, options.px);
+  const fg = options.fg || '#000000';
+  const bg = options.bg || '#ffffff';
+  const charset = ASCII_SETS[mode] || ASCII_SETS.ascii_simple;
+  const needsRebuild = !state.asciiCache || state.asciiCache.cols !== cols || state.asciiCache.rows !== rows || state.asciiCache.mode !== mode || state.asciiCache.tile !== tile;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  if(needsRebuild){
+    const width = Math.round(cols*tile);
+    const height = Math.round(rows*tile);
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('xmlns', svgNS);
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    const bgRect = document.createElementNS(svgNS, 'rect');
+    bgRect.setAttribute('width','100%');
+    bgRect.setAttribute('height','100%');
+    svg.appendChild(bgRect);
+    const group = document.createElementNS(svgNS, 'g');
+    group.setAttribute('font-family','JetBrains Mono, monospace');
+    group.setAttribute('font-size', String(tile));
+    group.setAttribute('text-anchor','middle');
+    svg.appendChild(group);
+    const nodes = new Array(cols*rows);
+    for(let y=0;y<rows;y++){
+      for(let x=0;x<cols;x++){
+        const idx = y*cols+x;
+        const textEl = document.createElementNS(svgNS, 'text');
+        const cx = Math.round(x*tile + tile/2);
+        const cy = Math.round(y*tile + tile*0.82);
+        textEl.setAttribute('x', String(cx));
+        textEl.setAttribute('y', String(cy));
+        group.appendChild(textEl);
+        nodes[idx] = textEl;
+      }
+    }
+    state.asciiCache = {cols, rows, mode, tile, svg, bgRect, group, nodes, values: new Int16Array(cols*rows).fill(-1)};
+  }else if(state.asciiCache.values.length !== cols*rows){
+    state.asciiCache.values = new Int16Array(cols*rows).fill(-1);
+  }
+  const cache = state.asciiCache;
+  cache.bgRect.setAttribute('fill', bg);
+  cache.group.setAttribute('fill', fg);
+  const asciiData = result.ascii || [];
+  const nodes = cache.nodes;
+  const values = cache.values;
+  for(let i=0;i<nodes.length;i++){
+    const index = asciiData[i] ?? 0;
+    if(values[i] === index) continue;
+    const ch = charset[Math.max(0, Math.min(charset.length-1, index))] || charset[0];
+    nodes[i].textContent = ch;
+    values[i] = index;
+  }
+  return cache.svg;
+}
+
+
+function renderPreview(previewData, scale){
+  if(!preview) return;
+  preview.innerHTML = '';
+  if(!previewData || !previewData.svgString){
+    if(meta) meta.textContent = '';
+    return;
+  }
+  const frame = document.createElement('div');
+  frame.className = 'preview-frame';
+  const dims = computePreviewDimensions(previewData.width, previewData.height, scale);
+  frame.style.width = `${dims.width}px`;
+  frame.style.height = `${dims.height}px`;
+  let node = null;
+  if(previewData.svgElement){
+    node = previewData.svgElement;
+  }else{
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = previewData.svgString;
+    node = wrapper.firstElementChild;
+  }
+  if(node){
+    node.setAttribute('width','100%');
+    node.setAttribute('height','100%');
+    node.setAttribute('preserveAspectRatio','xMidYMid meet');
+    node.style.width = '100%';
+    node.style.height = '100%';
+    frame.appendChild(node);
+  }
+  preview.appendChild(frame);
+}
+
+function schedulePreviewRefresh(){
+  if(!state.lastPreview) return;
+  const dims = computePreviewDimensions(state.lastSize.width, state.lastSize.height, state.lastScale);
+  const frame = preview.querySelector('.preview-frame');
+  if(frame){
+    frame.style.width = `${dims.width}px`;
+    frame.style.height = `${dims.height}px`;
+  }
+}
+
+function computePreviewDimensions(width, height, scale){
+  const hostRect = preview.getBoundingClientRect();
+  const availableW = Math.max(1, preview.clientWidth || hostRect.width || width);
+  const availableH = Math.max(1, preview.clientHeight || hostRect.height || height);
+  const ratio = height ? width/height : 1;
+  const userScale = Number.isFinite(scale) && scale>0 ? scale : 1;
+  let baseW = availableW;
+  let baseH = ratio ? baseW/ratio : availableH;
+  if(baseH > availableH){
+    baseH = availableH;
+    baseW = baseH * ratio;
+  }
+  const targetW = Math.min(baseW * userScale, availableW);
+  const targetH = Math.min(baseH * userScale, availableH);
+  return {
+    width: Math.max(1, Math.round(targetW)),
+    height: Math.max(1, Math.round(targetH))
+  };
+}
+
+function updateMeta(width, height){
+  if(!meta) return;
+  if(width && height){
+    meta.textContent = `${width}×${height}px`;
+  }else{
+    meta.textContent = '';
+  }
+}
+
+function updateExportButtons(){
+  const hasSVG = !!(state.lastPreview && state.lastPreview.svgString);
+  const jobActive = renderBusy || state.pendingJobs.size > 0;
+  ['dlSVG','dlPNG','dlJPG'].forEach((id) => {
+    const btn = $(id);
+    if(!btn) return;
+    const busy = btn.dataset.busy === 'true';
+    const disabled = busy || !hasSVG || jobActive;
+    btn.disabled = disabled;
+    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    if(busy) btn.setAttribute('aria-busy','true');
+    else btn.removeAttribute('aria-busy');
+  });
+}
+
+function setButtonBusy(btn, busy, label){
+  if(!btn) return;
+  if(busy){
+    if(!btn.dataset.originalLabel) btn.dataset.originalLabel = btn.textContent;
+    if(label) btn.textContent = label;
+    btn.dataset.busy = 'true';
+    btn.disabled = true;
+    btn.setAttribute('aria-busy','true');
+    btn.setAttribute('aria-disabled','true');
+  }else{
+    if(btn.dataset.originalLabel) btn.textContent = btn.dataset.originalLabel;
+    delete btn.dataset.originalLabel;
+    delete btn.dataset.busy;
+    btn.removeAttribute('aria-busy');
+    btn.removeAttribute('aria-disabled');
+  }
+}
+
+function triggerDownload(blob, filename){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function wait(ms){
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function downloadSVG(){
+  const previewData = ensurePreviewData();
+  if(!previewData || !previewData.svgString) return;
+  const blob = new Blob([previewData.svgString], {type:'image/svg+xml'});
+  triggerDownload(blob, 'bitmap.svg');
+}
+
+async function downloadRaster(format){
+  const previewData = ensurePreviewData();
+  if(!previewData || !previewData.svgString) return;
+  const dims = getExportDimensions();
+  const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
+  const dpi = getSelectedDPI();
+  const canvas = await rasterizeSVGToCanvas(previewData.svgString, dims.width, dims.height, background);
+  const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
+  const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
+  triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
+}
+
+function getExportDimensions(){
+  const defaultW = state.lastSize.width;
+  const defaultH = state.lastSize.height;
+  let outW = parseInt(controls.outW.value||'',10);
+  let outH = parseInt(controls.outH.value||'',10);
+  const lock = controls.lockAR && controls.lockAR.checked;
+  if(!Number.isFinite(outW) || outW<=0){
+    outW = defaultW;
+  }
+  if(!Number.isFinite(outH) || outH<=0){
+    outH = defaultH;
+  }
+  if(lock){
+    const ratio = defaultH ? defaultW/defaultH : 1;
+    if(outW && !outH){
+      outH = Math.round(outW/ratio);
+    }else if(outH && !outW){
+      outW = Math.round(outH*ratio);
+    }
+  }
+  outW = Math.min(3000, Math.max(1, Math.round(outW)));
+  outH = Math.min(3000, Math.max(1, Math.round(outH)));
+  return {width: outW, height: outH};
+}
+
+function ensurePreviewData(){
+  if(state.lastPreview && state.lastPreview.svgString){
+    return state.lastPreview;
+  }
+  if(state.lastResult && state.lastResult.data){
+    const previewData = buildSVGFromResult(state.lastResult.data, state.lastResult.options);
+    state.lastPreview = previewData;
+    state.lastSVG = previewData.svgString;
+    state.lastSize = {width: previewData.width, height: previewData.height};
+    state.lastScale = state.lastResult.options ? state.lastResult.options.scale : state.lastScale;
+    return previewData;
+  }
+  return null;
+}
+
+function getSelectedDPI(){
+  const value = controls.dpi ? parseInt(controls.dpi.value||'72', 10) : 72;
+  if(value === 150 || value === 300) return value;
+  return 72;
+}
+
+function getJPEGQuality(){
+  const raw = parseFloat(controls.jpegQ ? controls.jpegQ.value || '0.88' : '0.88');
+  if(!Number.isFinite(raw)) return 0.88;
+  return Math.min(0.95, Math.max(0.6, raw));
+}
+
+async function rasterizeSVGToCanvas(svgString, width, height, background){
+  const canvas = createExportCanvas(width, height);
+  const ctx = canvas.getContext('2d', {alpha: !background});
+  if(!ctx) throw new Error('Impossibile ottenere il contesto di disegno');
+  ctx.imageSmoothingEnabled = true;
+  if(ctx.imageSmoothingQuality){
+    ctx.imageSmoothingQuality = 'high';
+  }
+  if(background){
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+  }else{
+    ctx.clearRect(0, 0, width, height);
+  }
+  const drawable = await createSVGDrawable(svgString);
+  try{
+    drawable.draw(ctx, width, height);
+  }finally{
+    drawable.cleanup();
+  }
+  return canvas;
+}
+
+async function createSVGDrawable(svgString){
+  const blob = new Blob([svgString], {type:'image/svg+xml'});
+  if(typeof createImageBitmap === 'function'){
+    try{
+      const bitmap = await createImageBitmap(blob);
+      return {
+        draw(ctx, width, height){
+          ctx.drawImage(bitmap, 0, 0, width, height);
+        },
+        cleanup(){
+          if(typeof bitmap.close === 'function'){
+            bitmap.close();
+          }
+        }
+      };
+    }catch(err){
+      // fallback to Image
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.decoding = 'async';
+  img.src = url;
+  await img.decode();
+  return {
+    draw(ctx, width, height){
+      ctx.drawImage(img, 0, 0, width, height);
+    },
+    cleanup(){
+      URL.revokeObjectURL(url);
+    }
+  };
+}
+
+function createExportCanvas(width, height){
+  if(typeof OffscreenCanvas !== 'undefined'){
+    return new OffscreenCanvas(width, height);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+async function canvasToBlobWithDPI(canvas, format, quality, dpi){
+  let blob;
+  if(typeof canvas.convertToBlob === 'function'){
+    blob = await canvas.convertToBlob({type: format, quality});
+  }else{
+    blob = await new Promise((resolve, reject) => {
+      const handler = (b) => b ? resolve(b) : reject(new Error('Raster export failed'));
+      const result = canvas.toBlob(handler, format, quality);
+      if(result && typeof result.then === 'function'){
+        result.then(resolve, reject);
+      }
+    });
+  }
+  return injectDPI(blob, format, dpi);
+}
+
+async function injectDPI(blob, format, dpi){
+  if(format === 'image/png'){
+    return injectPNGDPI(blob, dpi);
+  }
+  if(format === 'image/jpeg'){
+    return injectJPEGDPI(blob, dpi);
+  }
+  return blob;
+}
+
+async function injectPNGDPI(blob, dpi){
+  try{
+    const buffer = new Uint8Array(await blob.arrayBuffer());
+    if(buffer.length < 8) return blob;
+    const signature = [137,80,78,71,13,10,26,10];
+    for(let i=0;i<signature.length;i++){
+      if(buffer[i] !== signature[i]) return blob;
+    }
+    const dpmm = Math.max(1, Math.round(dpi / 0.0254));
+    let offset = 8;
+    let updated = false;
+    while(offset + 12 <= buffer.length){
+      const length = readUint32BE(buffer, offset);
+      const type = String.fromCharCode(buffer[offset+4], buffer[offset+5], buffer[offset+6], buffer[offset+7]);
+      if(type === 'pHYs'){
+        writeUint32BE(buffer, offset+8, dpmm);
+        writeUint32BE(buffer, offset+12, dpmm);
+        buffer[offset+16] = 1;
+        const crc = crc32(buffer.subarray(offset+4, offset+8+length));
+        writeUint32BE(buffer, offset+8+length, crc);
+        updated = true;
+        break;
+      }
+      if(type === 'IEND') break;
+      offset += 12 + length;
+    }
+    if(updated){
+      return new Blob([buffer], {type:'image/png'});
+    }
+    const ihdrLength = readUint32BE(buffer, 8);
+    const ihdrTotal = 12 + ihdrLength;
+    const insertPos = 8 + ihdrTotal;
+    const chunkData = new Uint8Array(9);
+    writeUint32BE(chunkData, 0, dpmm);
+    writeUint32BE(chunkData, 4, dpmm);
+    chunkData[8] = 1;
+    const chunkType = new Uint8Array([0x70,0x48,0x59,0x73]);
+    const lengthBytes = new Uint8Array(4);
+    writeUint32BE(lengthBytes, 0, 9);
+    const typeAndData = new Uint8Array(4 + chunkData.length);
+    typeAndData.set(chunkType, 0);
+    typeAndData.set(chunkData, 4);
+    const crcValue = crc32(typeAndData);
+    const crcBytes = new Uint8Array(4);
+    writeUint32BE(crcBytes, 0, crcValue);
+    const newBuffer = new Uint8Array(buffer.length + 4 + typeAndData.length + 4);
+    newBuffer.set(buffer.subarray(0, insertPos), 0);
+    let cursor = insertPos;
+    newBuffer.set(lengthBytes, cursor); cursor += 4;
+    newBuffer.set(typeAndData, cursor); cursor += typeAndData.length;
+    newBuffer.set(crcBytes, cursor); cursor += 4;
+    newBuffer.set(buffer.subarray(insertPos), cursor);
+    return new Blob([newBuffer], {type:'image/png'});
+  }catch(err){
+    return blob;
+  }
+}
+
+async function injectJPEGDPI(blob, dpi){
+  try{
+    const buffer = new Uint8Array(await blob.arrayBuffer());
+    if(buffer.length < 2 || buffer[0] !== 0xFF || buffer[1] !== 0xD8) return blob;
+    const density = Math.max(1, Math.round(dpi));
+    let offset = 2;
+    while(offset + 4 < buffer.length){
+      if(buffer[offset] !== 0xFF) break;
+      const marker = buffer[offset+1];
+      if(marker === 0xDA) break;
+      const length = (buffer[offset+2] << 8) | buffer[offset+3];
+      if(marker === 0xE0 && length >= 16 && buffer[offset+4] === 0x4A && buffer[offset+5] === 0x46 && buffer[offset+6] === 0x49 && buffer[offset+7] === 0x46 && buffer[offset+8] === 0x00){
+        buffer[offset+11] = 1;
+        buffer[offset+12] = (density >> 8) & 0xFF;
+        buffer[offset+13] = density & 0xFF;
+        buffer[offset+14] = (density >> 8) & 0xFF;
+        buffer[offset+15] = density & 0xFF;
+        return new Blob([buffer], {type:'image/jpeg'});
+      }
+      offset += 2 + length;
+    }
+    const segment = new Uint8Array(18);
+    segment[0] = 0xFF; segment[1] = 0xE0;
+    segment[2] = 0x00; segment[3] = 0x10;
+    segment[4] = 0x4A; segment[5] = 0x46; segment[6] = 0x49; segment[7] = 0x46; segment[8] = 0x00;
+    segment[9] = 0x01; segment[10] = 0x02;
+    segment[11] = 0x01;
+    segment[12] = (density >> 8) & 0xFF;
+    segment[13] = density & 0xFF;
+    segment[14] = (density >> 8) & 0xFF;
+    segment[15] = density & 0xFF;
+    segment[16] = 0x00;
+    segment[17] = 0x00;
+    const newBuffer = new Uint8Array(buffer.length + segment.length);
+    newBuffer.set(buffer.subarray(0, 2), 0);
+    newBuffer.set(segment, 2);
+    newBuffer.set(buffer.subarray(2), 2 + segment.length);
+    return new Blob([newBuffer], {type:'image/jpeg'});
+  }catch(err){
+    return blob;
+  }
+}
+
+function readUint32BE(buffer, offset){
+  return ((buffer[offset] << 24) >>> 0) + (buffer[offset+1] << 16) + (buffer[offset+2] << 8) + buffer[offset+3];
+}
+
+function writeUint32BE(buffer, offset, value){
+  buffer[offset] = (value >>> 24) & 0xFF;
+  buffer[offset+1] = (value >>> 16) & 0xFF;
+  buffer[offset+2] = (value >>> 8) & 0xFF;
+  buffer[offset+3] = value & 0xFF;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for(let n=0;n<256;n++){
+    let c = n;
+    for(let k=0;k<8;k++){
+      c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes){
+  let c = 0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++){
+    c = CRC32_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function bindExportButtons(){
+  const svgBtn = $('dlSVG');
+  if(svgBtn){
+    svgBtn.addEventListener('click', async () => {
+      if(svgBtn.dataset.busy === 'true') return;
+      setButtonBusy(svgBtn, true, 'Preparing…');
+      try{
+        await downloadSVG();
+      }finally{
+        setButtonBusy(svgBtn, false);
+        updateExportButtons();
+      }
+    });
+  }
+  const pngBtn = $('dlPNG');
+  if(pngBtn){
+    pngBtn.addEventListener('click', async () => {
+      if(pngBtn.dataset.busy === 'true') return;
+      setButtonBusy(pngBtn, true, 'Preparing…');
+      try{
+        await downloadRaster('image/png');
+      }finally{
+        setButtonBusy(pngBtn, false);
+        updateExportButtons();
+      }
+    });
+  }
+  const jpgBtn = $('dlJPG');
+  if(jpgBtn){
+    jpgBtn.addEventListener('click', async () => {
+      if(jpgBtn.dataset.busy === 'true') return;
+      setButtonBusy(jpgBtn, true, 'Preparing…');
+      try{
+        await downloadRaster('image/jpeg');
+      }finally{
+        setButtonBusy(jpgBtn, false);
+        updateExportButtons();
+      }
+    });
+  }
+}
+
+let placeholderCanvas = null;
+function getPlaceholderCanvas(){
+  if(!placeholderCanvas){
+    placeholderCanvas = document.createElement('canvas');
+    placeholderCanvas.width = 800;
+    placeholderCanvas.height = 400;
+    const ctx = placeholderCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,placeholderCanvas.width,placeholderCanvas.height);
+    ctx.fillStyle = '#000000';
+    ctx.font = '700 140px "JetBrains Mono", monospace';
+    ctx.fillText('Aa', 20, 160);
+  }
+  return placeholderCanvas;
+}
+
+bindExportButtons();
+init();
