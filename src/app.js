@@ -47,7 +47,6 @@ const state = {
   lastSVGJob: 0,
   lastSize: {width: 0, height: 0},
   lastScale: 1,
-  asciiCache: null,
   offscreenSupported: OFFSCREEN_SUPPORTED,
   sourceOffscreen: null
 };
@@ -361,7 +360,6 @@ function setSourceCanvas(canvas, name){
   state.sourceHeight = canvas.height;
   state.lastResult = null;
   state.lastResultId = 0;
-  state.asciiCache = null;
   state.lastPreview = null;
   state.lastSVG = '';
   state.lastSVGJob = 0;
@@ -575,7 +573,6 @@ function requestWorkerProcess(message){
 
 function buildPreviewData(result, options){
   if(!result){
-    state.asciiCache = null;
     return null;
   }
   const {gridWidth, gridHeight, mode, mask} = result;
@@ -583,20 +580,6 @@ function buildPreviewData(result, options){
   const width = Math.round(gridWidth * tile);
   const height = Math.round(gridHeight * tile);
   const previewMode = mode || options.mode || 'none';
-  if(previewMode && previewMode.startsWith('ascii')){
-    const svgElement = getAsciiSVGElement(result, options);
-    return {
-      type: 'ascii',
-      mode: previewMode,
-      width,
-      height,
-      gridWidth,
-      gridHeight,
-      tile,
-      node: svgElement
-    };
-  }
-  state.asciiCache = null;
   return {
     type: 'mask',
     mode: previewMode,
@@ -638,100 +621,9 @@ function buildMaskSVGString(mask, width, height, tile, bg, fg){
   return svg;
 }
 
-const ASCII_SETS = {
-  ascii_simple: [' ','.',':','-','=','+','#','@'],
-  ascii_unicode8: [' ','·',':','-','=','+','*','#','%','@'],
-  ascii_chinese: ['　','丶','丿','ノ','乙','人','口','回','田','国']
-};
-
-function buildASCIISVGString(ascii, tonal, width, height, tile, bg, fg, mode){
-  const charset = ASCII_SETS[mode] || ASCII_SETS.ascii_simple;
-  const svgW = Math.round(width*tile);
-  const svgH = Math.round(height*tile);
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
-  if(bg) svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
-  svg += `<g fill="${fg}" font-family="JetBrains Mono, monospace" font-size="${tile}" text-anchor="middle">`;
-  for(let y=0;y<height;y++){
-    for(let x=0;x<width;x++){
-      const idx = y*width+x;
-      const tone = tonal ? tonal[idx] : 0;
-      const charIndex = ascii ? ascii[idx] : Math.round((charset.length-1)*(1 - tone/255));
-      const ch = charset[Math.max(0, Math.min(charset.length-1, charIndex))];
-      const cx = Math.round(x*tile + tile/2);
-      const cy = Math.round(y*tile + tile*0.82);
-      svg += `<text x="${cx}" y="${cy}">${ch}</text>`;
-    }
-  }
-  svg += '</g></svg>';
-  return svg;
-}
-
-function getAsciiSVGElement(result, options){
-  const cols = result.gridWidth;
-  const rows = result.gridHeight;
-  const mode = result.mode || 'ascii_simple';
-  const tile = Math.max(1, options.px);
-  const fg = options.fg || '#000000';
-  const bg = options.bg || '#ffffff';
-  const charset = ASCII_SETS[mode] || ASCII_SETS.ascii_simple;
-  const needsRebuild = !state.asciiCache || state.asciiCache.cols !== cols || state.asciiCache.rows !== rows || state.asciiCache.mode !== mode || state.asciiCache.tile !== tile;
-  const svgNS = 'http://www.w3.org/2000/svg';
-  if(needsRebuild){
-    const width = Math.round(cols*tile);
-    const height = Math.round(rows*tile);
-    const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('xmlns', svgNS);
-    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    svg.setAttribute('width', String(width));
-    svg.setAttribute('height', String(height));
-    const bgRect = document.createElementNS(svgNS, 'rect');
-    bgRect.setAttribute('width','100%');
-    bgRect.setAttribute('height','100%');
-    svg.appendChild(bgRect);
-    const group = document.createElementNS(svgNS, 'g');
-    group.setAttribute('font-family','JetBrains Mono, monospace');
-    group.setAttribute('font-size', String(tile));
-    group.setAttribute('text-anchor','middle');
-    svg.appendChild(group);
-    const nodes = new Array(cols*rows);
-    for(let y=0;y<rows;y++){
-      for(let x=0;x<cols;x++){
-        const idx = y*cols+x;
-        const textEl = document.createElementNS(svgNS, 'text');
-        const cx = Math.round(x*tile + tile/2);
-        const cy = Math.round(y*tile + tile*0.82);
-        textEl.setAttribute('x', String(cx));
-        textEl.setAttribute('y', String(cy));
-        group.appendChild(textEl);
-        nodes[idx] = textEl;
-      }
-    }
-    state.asciiCache = {cols, rows, mode, tile, svg, bgRect, group, nodes, values: new Int16Array(cols*rows).fill(-1)};
-  }else if(state.asciiCache.values.length !== cols*rows){
-    state.asciiCache.values = new Int16Array(cols*rows).fill(-1);
-  }
-  const cache = state.asciiCache;
-  cache.bgRect.setAttribute('fill', bg);
-  cache.group.setAttribute('fill', fg);
-  const asciiData = result.ascii || [];
-  const nodes = cache.nodes;
-  const values = cache.values;
-  for(let i=0;i<nodes.length;i++){
-    const index = asciiData[i] ?? 0;
-    if(values[i] === index) continue;
-    const ch = charset[Math.max(0, Math.min(charset.length-1, index))] || charset[0];
-    nodes[i].textContent = ch;
-    values[i] = index;
-  }
-  return cache.svg;
-}
-
 function buildExportSVG(result, options){
   if(!result) return '';
   const tile = Math.max(1, options.px);
-  if(result.mode && result.mode.startsWith('ascii')){
-    return buildASCIISVGString(result.ascii, result.tonal, result.gridWidth, result.gridHeight, tile, options.bg, options.fg, result.mode);
-  }
   return buildMaskSVGString(result.mask, result.gridWidth, result.gridHeight, tile, options.bg, options.fg);
 }
 
@@ -747,15 +639,7 @@ function renderPreview(previewData, scale){
   const dims = computePreviewDimensions(previewData.width, previewData.height, scale);
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
-  if(previewData.type === 'ascii' && previewData.node){
-    const node = previewData.node;
-    node.setAttribute('width','100%');
-    node.setAttribute('height','100%');
-    node.setAttribute('preserveAspectRatio','xMidYMid meet');
-    node.style.width = '100%';
-    node.style.height = '100%';
-    frame.appendChild(node);
-  }else if(previewData.type === 'mask'){
+  if(previewData.type === 'mask'){
     const canvas = document.createElement('canvas');
     canvas.width = previewData.width;
     canvas.height = previewData.height;

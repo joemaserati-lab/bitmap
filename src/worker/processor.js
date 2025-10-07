@@ -29,12 +29,6 @@ const DIFFUSION_KERNELS = {
   sierra2:{div:32,taps:[{dx:1,dy:0,w:4},{dx:2,dy:0,w:3},{dx:-2,dy:1,w:1},{dx:-1,dy:1,w:2},{dx:0,dy:1,w:3},{dx:1,dy:1,w:2},{dx:2,dy:1,w:1}]}
 };
 
-const ASCII_SETS = {
-  ascii_simple: [' ','.',':','-','=','+','#','@'],
-  ascii_unicode8: [' ','·',':','-','=','+','*','#','%','@'],
-  ascii_chinese: ['　','丶','丿','ノ','乙','人','口','回','田','国']
-};
-
 ctx.postMessage({type:'ready'});
 
 ctx.addEventListener('message', (event) => {
@@ -84,8 +78,6 @@ function handleProcess({jobId, options}){
     const result = processImage(options||{});
     const transfers = [];
     if(result.mask) transfers.push(result.mask.buffer);
-    if(result.tonal) transfers.push(result.tonal.buffer);
-    if(result.ascii) transfers.push(result.ascii.buffer);
     ctx.postMessage({...result, type:'result', jobId}, transfers);
   }catch(error){
     ctx.postMessage({type:'error', jobId, message: error && error.message ? error.message : String(error)});
@@ -144,17 +136,12 @@ function processImage(options){
 
   const dither = options.dither || 'none';
   let mask = null;
-  let ascii = null;
-  if(dither.startsWith('ascii')){
-    ascii = buildAsciiIndices(tonal, gridWidth, gridHeight, dither, invert);
+  if(dither === 'none'){
+    mask = thresholdMask(tonal, gridWidth, gridHeight, options.threshold, invert);
+  }else if(dither === 'bayer4' || dither === 'bayer8' || dither === 'cross'){
+    mask = orderedDither(tonal, gridWidth, gridHeight, options.threshold, invert, dither);
   }else{
-    if(dither === 'none'){
-      mask = thresholdMask(tonal, gridWidth, gridHeight, options.threshold, invert);
-    }else if(dither === 'bayer4' || dither === 'bayer8' || dither === 'cross'){
-      mask = orderedDither(tonal, gridWidth, gridHeight, options.threshold, invert, dither);
-    }else{
-      mask = errorDiffuse(tonal, gridWidth, gridHeight, options.threshold, invert, dither);
-    }
+    mask = errorDiffuse(tonal, gridWidth, gridHeight, options.threshold, invert, dither);
   }
 
   if(mask){
@@ -175,9 +162,7 @@ function processImage(options){
     mode: dither,
     outputWidth: Math.round(gridWidth*pixelSize),
     outputHeight: Math.round(gridHeight*pixelSize),
-    mask,
-    tonal: dither.startsWith('ascii') ? tonal : null,
-    ascii
+    mask
   };
 }
 
@@ -277,15 +262,10 @@ function orderedDither(gray, width, height, threshold, invert, mode){
   if(mode === 'bayer8'){
     return orderedDither(gray, width, height, threshold, invert, 'bayer4');
   }
-  const out = new Uint8Array(width*height);
   if(mode === 'cross'){
-    for(let y=0;y<height;y++){
-      for(let x=0;x<width;x++){
-        out[y*width+x] = ((x+y)%2===0) ? 1 : 0;
-      }
-    }
-    return out;
+    return crosshatchDither(gray, width, height, threshold, invert);
   }
+  const out = new Uint8Array(width*height);
   const thr = Math.max(0, Math.min(255, parseInt(threshold,10)||0));
   const N = 16;
   for(let y=0;y<height;y++){
@@ -295,6 +275,40 @@ function orderedDither(gray, width, height, threshold, invert, mode){
       const g = (gray[i]-thr)/255+0.5;
       const on = invert ? (g > thresholdMatrix) : (g < thresholdMatrix);
       out[i] = on ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+function crosshatchDither(gray, width, height, threshold, invert){
+  const out = new Uint8Array(width*height);
+  const thr = Math.max(0, Math.min(255, parseInt(threshold,10)||0));
+  const bias = thr - 128;
+  for(let y=0;y<height;y++){
+    const ym = y & 3;
+    const yEven = (y & 1) === 0;
+    for(let x=0;x<width;x++){
+      const idx = y*width + x;
+      const xm = x & 3;
+      const value = gray[idx];
+      let intensity = invert ? value : (255 - value);
+      intensity = clamp255(intensity + bias);
+      let level = Math.floor(intensity / 51);
+      if(level < 0) level = 0;
+      else if(level > 5) level = 5;
+      let on = false;
+      if(level >= 5){
+        on = true;
+      }else if(level === 4){
+        on = (xm === ym) || ((xm + ym) === 3) || yEven || ((x & 1) === 0);
+      }else if(level === 3){
+        on = (xm === ym) || ((xm + ym) === 3) || yEven;
+      }else if(level === 2){
+        on = (xm === ym) || ((xm + ym) === 3);
+      }else if(level === 1){
+        on = (xm === ym);
+      }
+      out[idx] = on ? 1 : 0;
     }
   }
   return out;
@@ -396,23 +410,6 @@ function subtract(a, b){
     out[i] = a[i] && !b[i] ? 1 : 0;
   }
   return out;
-}
-
-function buildAsciiIndices(tonal, width, height, mode, invert){
-  const charset = getAsciiSet(mode);
-  const out = new Uint8Array(width*height);
-  const maxIdx = charset.length-1;
-  for(let i=0;i<out.length;i++){
-    const value = tonal[i];
-    const norm = value/255;
-    const idx = Math.round(maxIdx * (invert ? norm : (1 - norm)));
-    out[i] = idx<0 ? 0 : (idx>maxIdx ? maxIdx : idx);
-  }
-  return out;
-}
-
-function getAsciiSet(mode){
-  return ASCII_SETS[mode] || ASCII_SETS.ascii_simple;
 }
 
 function applyGaussianBlur(buffer, width, height, radius){
