@@ -30,6 +30,11 @@ const DIFFUSION_KERNELS = {
   sierra2:{div:32,taps:[{dx:1,dy:0,w:4},{dx:2,dy:0,w:3},{dx:-2,dy:1,w:1},{dx:-1,dy:1,w:2},{dx:0,dy:1,w:3},{dx:1,dy:1,w:2},{dx:2,dy:1,w:1}]}
 };
 
+const ASCII_SETS = {
+  ascii_simple: [' ','.',':','-','=','+','#','@'],
+  ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
+};
+
 ctx.postMessage({type:'ready'});
 
 ctx.addEventListener('message', (event) => {
@@ -142,6 +147,21 @@ function processImage(options){
   let gridHeight = baseHeight;
   let tile = pixelSize;
 
+  if(dither === 'ascii_simple' || dither === 'ascii_unicode'){
+    const ascii = asciiDither(tonal, baseWidth, baseHeight, invert, dither);
+    return {
+      kind: 'ascii',
+      gridWidth: baseWidth,
+      gridHeight: baseHeight,
+      mode: dither,
+      outputWidth: Math.round(baseWidth*pixelSize),
+      outputHeight: Math.round(baseHeight*pixelSize),
+      tile: pixelSize,
+      ascii: ascii.buffer,
+      charset: ascii.key
+    };
+  }
+
   if(dither === 'halftone' || dither === 'halftone_motion'){
     const halftone = halftoneDither(tonal, baseWidth, baseHeight, options.threshold, invert, dither, pixelSize);
     mask = halftone.mask;
@@ -169,6 +189,7 @@ function processImage(options){
   }
 
   return {
+    kind: 'mask',
     gridWidth,
     gridHeight,
     mode: dither,
@@ -177,6 +198,20 @@ function processImage(options){
     tile,
     mask
   };
+}
+
+function asciiDither(gray, width, height, invert, key){
+  const charset = ASCII_SETS[key] || ASCII_SETS.ascii_simple;
+  const maxIndex = charset.length > 0 ? charset.length - 1 : 0;
+  const buffer = new Uint8Array(width*height);
+  for(let i=0;i<buffer.length;i++){
+    const value = invert ? (255 - gray[i]) : gray[i];
+    let idx = Math.round((value/255) * maxIndex);
+    if(idx < 0) idx = 0;
+    else if(idx > maxIndex) idx = maxIndex;
+    buffer[i] = idx;
+  }
+  return {buffer, key};
 }
 
 

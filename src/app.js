@@ -33,6 +33,13 @@ const RENDER_DEBOUNCE_MS = 90;
 
 const OFFSCREEN_SUPPORTED = typeof OffscreenCanvas !== 'undefined';
 
+const ASCII_CHARSETS = {
+  ascii_simple: [' ','.',':','-','=','+','#','@'],
+  ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
+};
+
+const ASCII_FONT_STACK = 'IBM Plex Mono, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace';
+
 const state = {
   sourceCanvas: null,
   sourceName: '',
@@ -1125,11 +1132,16 @@ async function generate(){
   };
   const result = await requestWorkerProcess(payload);
   if(!result || result.jobId !== jobId) return;
-  state.lastResult = {type: 'image', options, frame: result};
+  const frameData = createFrameData(result, options);
+  if(frameData && frameData.kind === 'ascii'){
+    result.lines = frameData.lines;
+    result.charset = frameData.charsetKey;
+  }
+  state.lastResult = {type: 'image', options, frame: result, frameData};
   state.lastResultId = jobId;
   state.lastSVG = '';
   state.lastSVGJob = 0;
-  const previewData = buildPreviewData(result, options);
+  const previewData = buildPreviewData(frameData, options);
   state.lastPreview = previewData;
   const previewWidth = previewData ? previewData.width : 0;
   const previewHeight = previewData ? previewData.height : 0;
@@ -1176,7 +1188,7 @@ async function generateVideoPreview(options){
     };
     const result = await requestWorkerProcess(payload);
     if(!result || result.jobId !== jobId) return;
-    frames.push(result);
+    frames.push(createFrameData(result, options));
   }
   state.lastResult = {type: 'video', options, frames, durations};
   state.lastResultId = state.currentJobId;
@@ -1211,52 +1223,119 @@ function requestWorkerProcess(message){
   });
 }
 
-function buildPreviewData(result, options){
+function getASCIICharset(key){
+  return ASCII_CHARSETS[key] || ASCII_CHARSETS.ascii_simple;
+}
+
+function asciiBufferToLines(buffer, width, height, charset){
+  if(!buffer || !charset){
+    return [];
+  }
+  const lines = new Array(height);
+  const fallback = charset.length ? charset[charset.length-1] : ' ';
+  for(let y=0;y<height;y++){
+    const row = new Array(width);
+    const rowOffset = y*width;
+    for(let x=0;x<width;x++){
+      const idx = buffer[rowOffset + x];
+      row[x] = charset[idx] || fallback;
+    }
+    lines[y] = row.join('');
+  }
+  return lines;
+}
+
+function createFrameData(result, options){
   if(!result){
     return null;
   }
-  const {gridWidth, gridHeight, mode, mask} = result;
   const tile = result.tile != null ? result.tile : Math.max(1, options.px);
-  const width = Math.round(result.outputWidth || (gridWidth * tile));
-  const height = Math.round(result.outputHeight || (gridHeight * tile));
-  const previewMode = mode || options.mode || 'none';
+  const outputWidth = Math.round(result.outputWidth || (result.gridWidth * tile));
+  const outputHeight = Math.round(result.outputHeight || (result.gridHeight * tile));
+  const kind = result.kind || (result.ascii ? 'ascii' : 'mask');
+  if(kind === 'ascii'){
+    const charsetKey = result.charset || options.mode || 'ascii_simple';
+    const charset = getASCIICharset(charsetKey);
+    const lines = result.lines || asciiBufferToLines(result.ascii, result.gridWidth, result.gridHeight, charset);
+    return {
+      kind: 'ascii',
+      gridWidth: result.gridWidth,
+      gridHeight: result.gridHeight,
+      tile,
+      ascii: result.ascii,
+      lines,
+      charsetKey,
+      outputWidth,
+      outputHeight,
+      mode: result.mode || options.mode || 'ascii_simple'
+    };
+  }
+  return {
+    kind: 'mask',
+    gridWidth: result.gridWidth,
+    gridHeight: result.gridHeight,
+    tile,
+    mask: result.mask,
+    outputWidth,
+    outputHeight,
+    mode: result.mode || options.mode || 'none'
+  };
+}
+
+function buildPreviewData(frame, options){
+  if(!frame){
+    return null;
+  }
+  if(frame.kind === 'ascii'){
+    return {
+      type: 'ascii',
+      mode: frame.mode,
+      width: frame.outputWidth,
+      height: frame.outputHeight,
+      gridWidth: frame.gridWidth,
+      gridHeight: frame.gridHeight,
+      tile: frame.tile,
+      lines: frame.lines,
+      charsetKey: frame.charsetKey,
+      bg: options.bg,
+      fg: options.fg,
+      glow: options.glow
+    };
+  }
   return {
     type: 'mask',
-    mode: previewMode,
-    width,
-    height,
-    gridWidth,
-    gridHeight,
-    tile,
-    mask,
+    mode: frame.mode,
+    width: frame.outputWidth,
+    height: frame.outputHeight,
+    gridWidth: frame.gridWidth,
+    gridHeight: frame.gridHeight,
+    tile: frame.tile,
+    mask: frame.mask,
     bg: options.bg,
     fg: options.fg,
     glow: options.glow
   };
 }
 
-function buildAnimationPreviewData(results, options, durations, fps){
-  if(!results || !results.length){
+function buildAnimationPreviewData(frames, options, durations, fps){
+  if(!frames || !frames.length){
     return null;
   }
-  const tile = results[0].tile != null ? results[0].tile : Math.max(1, options.px);
-  const first = results[0];
-  const width = Math.round(first.outputWidth || (first.gridWidth * tile));
-  const height = Math.round(first.outputHeight || (first.gridHeight * tile));
-  const frames = results.map((res) => ({
-    gridWidth: res.gridWidth,
-    gridHeight: res.gridHeight,
-    tile: res.tile != null ? res.tile : tile,
-    mask: res.mask
+  const first = frames[0];
+  const width = Math.max(1, Math.round(first.outputWidth));
+  const height = Math.max(1, Math.round(first.outputHeight));
+  const previewFrames = frames.map((frame) => ({
+    ...frame,
+    type: frame.kind
   }));
-  const effectiveDurations = durations.slice(0, frames.length);
-  const total = effectiveDurations.reduce((sum, val) => sum + val, 0) || (frames.length * 1000/VIDEO_PREVIEW_FPS);
-  const derivedFPS = total > 0 ? (frames.length / (total/1000)) : (fps || VIDEO_PREVIEW_FPS);
+  const effectiveDurations = durations.slice(0, previewFrames.length);
+  const total = effectiveDurations.reduce((sum, val) => sum + val, 0) || (previewFrames.length * 1000/VIDEO_PREVIEW_FPS);
+  const derivedFPS = total > 0 ? (previewFrames.length / (total/1000)) : (fps || VIDEO_PREVIEW_FPS);
   return {
     type: 'animation',
     width,
     height,
-    frames,
+    frames: previewFrames,
     durations: effectiveDurations,
     bg: options.bg,
     fg: options.fg,
@@ -1289,10 +1368,65 @@ function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}){
   return svg;
 }
 
+function buildAsciiSVGString(frame, tile, options){
+  const unit = tile || 1;
+  const svgW = Math.max(1, Math.round(frame.gridWidth * unit));
+  const svgH = Math.max(1, Math.round(frame.gridHeight * unit));
+  const lines = frame.lines && frame.lines.length ? frame.lines : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey));
+  const textMarkup = asciiLinesToSVGTexts(lines, unit);
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(options.bg && options.bg !== 'transparent'){
+    svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
+  }
+  if(!textMarkup){
+    svg += '</svg>';
+    return svg;
+  }
+  const fontSize = Math.max(unit * 0.85, 6);
+  const fgColor = options.fg || '#000000';
+  const glowAmount = Math.max(0, options.glow || 0);
+  if(glowAmount > 0){
+    const fgRGB = hexToRGB(fgColor);
+    const glowRGB = lightenColor(fgRGB, 0.4);
+    const blurRadius = Math.max(0.2, Math.sqrt(unit*unit) * (0.4 + glowAmount/90));
+    const glowOpacity = Math.min(1, 0.18 + glowAmount/120);
+    svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
+    svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  }
+  svg += `<g fill="${fgColor}" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  svg += '</svg>';
+  return svg;
+}
+
+function asciiLinesToSVGTexts(lines, unit){
+  if(!lines || !lines.length){
+    return '';
+  }
+  const x = unit * 0.1;
+  const baseline = unit * 0.82;
+  let markup = '';
+  for(let i=0;i<lines.length;i++){
+    const raw = lines[i];
+    if(!raw) continue;
+    const trimmed = raw.replace(/\s+$/, '');
+    if(!trimmed){
+      continue;
+    }
+    const y = baseline + i*unit;
+    markup += `<text x="${formatNumber(x)}" y="${formatNumber(y)}" xml:space="preserve">${escapeXML(trimmed)}</text>`;
+  }
+  return markup;
+}
+
 function buildExportSVG(result, options){
   if(!result) return '';
-  const tile = result.tile != null ? result.tile : Math.max(1, options.px);
-  return buildMaskSVGString(result.mask, result.gridWidth, result.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
+  const frame = createFrameData(result, options);
+  if(!frame) return '';
+  const tile = frame.tile != null ? frame.tile : Math.max(1, options.px);
+  if(frame.kind === 'ascii'){
+    return buildAsciiSVGString(frame, tile, options);
+  }
+  return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
 }
 
 function buildMaskPathData(mask, width, height, tile){
@@ -1311,6 +1445,19 @@ function formatNumber(value){
   const fixed = value.toFixed(3);
   if(fixed.indexOf('.') === -1) return fixed;
   return fixed.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
+function escapeXML(str){
+  return str.replace(/[&<>"']/g, (ch) => {
+    switch(ch){
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#39;';
+      default: return ch;
+    }
+  });
 }
 
 function stopPreviewAnimation(){
@@ -1342,7 +1489,7 @@ function updatePlaybackButton(show, playing){
 }
 
 function startPreviewAnimation(canvas, data){
-  const ctx = canvas.getContext('2d', {alpha: !!(data.bg && data.bg !== 'transparent')});
+  const ctx = canvas.getContext('2d', {alpha: !data.bg || data.bg === 'transparent'});
   if(!ctx || !data.frames || !data.frames.length) return;
   const player = {
     canvas,
@@ -1382,12 +1529,14 @@ function startPreviewAnimation(canvas, data){
 function drawAnimationFrame(player, index){
   const frame = player.data.frames[index];
   if(!frame) return;
-  paintMask(player.ctx, {
+  const frameData = {
     ...frame,
+    type: frame.type || frame.kind,
     bg: player.data.bg,
     fg: player.data.fg,
     glow: player.data.glow
-  }, player.canvas.width, player.canvas.height);
+  };
+  paintFrame(player.ctx, frameData, player.canvas.width, player.canvas.height);
 }
 
 function renderPreview(previewData, scale){
@@ -1403,11 +1552,11 @@ function renderPreview(previewData, scale){
   const dims = computePreviewDimensions(previewData.width, previewData.height, scale);
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
-  if(previewData.type === 'mask'){
+  if(previewData.type === 'mask' || previewData.type === 'ascii'){
     const canvas = document.createElement('canvas');
     canvas.width = previewData.width;
     canvas.height = previewData.height;
-    drawMaskPreview(canvas, previewData);
+    drawPreviewFrame(canvas, previewData);
     canvas.style.width = '100%';
     canvas.style.height = '100%';
     canvas.style.imageRendering = 'pixelated';
@@ -1428,6 +1577,16 @@ function renderPreview(previewData, scale){
 
 let glowHelperCanvas = null;
 let glowHelperCtx = null;
+
+function paintFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  const type = data.type || data.kind || (data.mask ? 'mask' : 'ascii');
+  if(type === 'ascii'){
+    paintAscii(ctx, data, outWidth, outHeight);
+  }else{
+    paintMask(ctx, data, outWidth, outHeight);
+  }
+}
 
 function paintMask(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
@@ -1487,6 +1646,65 @@ function paintMask(ctx, data, outWidth, outHeight){
   ctx.restore();
 }
 
+function paintAscii(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const lines = data.lines;
+  const gridWidth = Math.max(1, data.gridWidth || (lines && lines[0] ? lines[0].length : 0));
+  const gridHeight = Math.max(1, data.gridHeight || (lines ? lines.length : 0));
+  if(!lines || !lines.length || !gridWidth || !gridHeight){
+    ctx.restore();
+    return;
+  }
+  const cellWidth = outWidth / gridWidth;
+  const cellHeight = outHeight / gridHeight;
+  const fontSize = Math.max(6, cellHeight * 0.85);
+  ctx.font = `${fontSize}px ${ASCII_FONT_STACK}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.imageSmoothingEnabled = false;
+  const offsetX = cellWidth / 2;
+  const offsetY = cellHeight / 2;
+  const glowAmount = Math.max(0, data.glow || 0);
+  if(glowAmount > 0){
+    const fgRGB = hexToRGB(data.fg || '#000000');
+    const glowRGB = lightenColor(fgRGB, 0.4);
+    ctx.save();
+    ctx.fillStyle = `rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})`;
+    ctx.shadowColor = `rgba(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]},0.85)`;
+    ctx.shadowBlur = Math.max(2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.45 + glowAmount/80));
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
+    ctx.restore();
+  }
+  ctx.fillStyle = data.fg || '#000000';
+  drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
+  ctx.restore();
+}
+
+function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight){
+  for(let y=0;y<lines.length;y++){
+    const line = lines[y];
+    if(!line) continue;
+    const posY = y*cellHeight + offsetY;
+    for(let x=0;x<gridWidth;x++){
+      const ch = line.charAt(x);
+      if(!ch || ch === ' '){
+        continue;
+      }
+      const posX = x*cellWidth + offsetX;
+      ctx.fillText(ch, posX, posY);
+    }
+  }
+}
+
 function ensureGlowContext(width, height){
   if(!glowHelperCanvas){
     if(typeof document !== 'undefined' && document.createElement){
@@ -1535,10 +1753,11 @@ function lightenColor([r,g,b], amount){
   ];
 }
 
-function drawMaskPreview(canvas, data){
-  const ctx = canvas.getContext('2d', {alpha: !!data.bg && data.bg !== 'transparent'});
+function drawPreviewFrame(canvas, data){
+  const alpha = !data.bg || data.bg === 'transparent';
+  const ctx = canvas.getContext('2d', {alpha});
   if(!ctx) return;
-  paintMask(ctx, data, canvas.width, canvas.height);
+  paintFrame(ctx, data, canvas.width, canvas.height);
 }
 
 function schedulePreviewRefresh(){
@@ -1712,16 +1931,19 @@ async function downloadGIF(){
   const options = collectRenderOptions();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
-  const frames = exportData.frames.map((frame) =>
-    maskToBinaryFrame(
+  const frames = exportData.frames.map((frame) => {
+    if(frame.kind === 'ascii'){
+      return asciiFrameToBinaryFrame(frame, dims.width, dims.height, options);
+    }
+    return maskToBinaryFrame(
       frame.mask,
       frame.gridWidth,
       frame.gridHeight,
       dims.width,
       dims.height,
       frame.tile != null ? frame.tile : options.px
-    )
-  );
+    );
+  });
   const gifBytes = encodeBinaryGif(frames, dims.width, dims.height, exportData.durations, options.bg, options.fg);
   const blob = new Blob([gifBytes], {type:'image/gif'});
   triggerDownload(blob, 'bitmap.gif');
@@ -1757,15 +1979,14 @@ async function downloadMP4(){
   recorder.start();
   for(let i=0;i<exportData.frames.length;i++){
     const frame = exportData.frames[i];
-    paintMask(ctx, {
-      gridWidth: frame.gridWidth,
-      gridHeight: frame.gridHeight,
-      tile: frame.tile != null ? frame.tile : Math.max(1, options.px),
-      mask: frame.mask,
+    const frameData = {
+      ...frame,
+      type: frame.kind,
       bg: videoBg,
       fg: options.fg,
       glow: options.glow
-    }, dims.width, dims.height);
+    };
+    paintFrame(ctx, frameData, dims.width, dims.height);
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
   }
@@ -1869,6 +2090,31 @@ function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight, til
     }
   }
   return output;
+}
+
+function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
+  const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
+  const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
+  const canvas = createExportCanvas(width, height, {forceDOM: true});
+  const ctx = canvas.getContext('2d', {alpha: true});
+  if(!ctx) return new Uint8Array(width*height);
+  const lines = frame.lines && frame.lines.length ? frame.lines : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey || (options && options.mode)));
+  paintAscii(ctx, {
+    type: 'ascii',
+    lines,
+    gridWidth: frame.gridWidth,
+    gridHeight: frame.gridHeight,
+    tile: frame.tile,
+    bg: 'transparent',
+    fg: '#ffffff',
+    glow: 0
+  }, width, height);
+  const imageData = ctx.getImageData(0, 0, width, height).data;
+  const binary = new Uint8Array(width*height);
+  for(let i=0, p=0;i<imageData.length;i+=4,p++){
+    binary[p] = imageData[i+3] > 32 ? 1 : 0;
+  }
+  return binary;
 }
 
 function hexToRGB(hex){
