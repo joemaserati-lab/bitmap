@@ -5,6 +5,11 @@ const meta = $('meta');
 const uploadMessage = $('uploadMessage');
 const progressWrap = $('uploadProgressWrapper');
 const progressBar = $('uploadProgressBar');
+const exportModal = $('exportModal');
+const exportDialog = exportModal ? exportModal.querySelector('.export-modal__dialog') : null;
+const exportOverlay = exportModal ? exportModal.querySelector('.export-modal__overlay') : null;
+const openExportButton = $('openExport');
+const closeExportButton = $('closeExport');
 
 const CONTROL_IDS = [
   'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
@@ -66,12 +71,15 @@ let renderQueued = false;
 let renderTimer = null;
 let renderRaf = 0;
 let renderBusy = false;
+let exportModalVisible = false;
+let lastFocusedBeforeExport = null;
 
 function init(){
   initWorker();
   bindControls();
   bindFileInputs();
   bindDropzone();
+  bindExportModal();
   bindPlaybackControl();
   window.addEventListener('resize', () => {
     if(!state.lastSVG) return;
@@ -404,6 +412,107 @@ function bindDropzone(){
       await handleFile(event.dataTransfer.files[0]);
     }
   });
+}
+
+function bindExportModal(){
+  if(!exportModal || !openExportButton) return;
+  openExportButton.addEventListener('click', () => {
+    if(openExportButton.disabled) return;
+    openExportSettings();
+  });
+  if(closeExportButton){
+    closeExportButton.addEventListener('click', () => closeExportSettings());
+  }
+  if(exportOverlay){
+    exportOverlay.addEventListener('click', () => closeExportSettings());
+  }
+  exportModal.addEventListener('click', (event) => {
+    const target = event.target;
+    if(target instanceof HTMLElement && target.dataset && target.dataset.exportClose === 'true'){
+      closeExportSettings();
+    }
+  });
+  document.addEventListener('keydown', (event) => {
+    if(!exportModalVisible) return;
+    if(event.key === 'Escape'){
+      event.preventDefault();
+      closeExportSettings();
+    }else if(event.key === 'Tab'){
+      handleExportFocusTrap(event);
+    }
+  });
+}
+
+function openExportSettings(){
+  if(!exportModal || exportModalVisible) return;
+  exportModal.hidden = false;
+  exportModal.setAttribute('aria-hidden','false');
+  exportModalVisible = true;
+  lastFocusedBeforeExport = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  if(document.body){
+    document.body.classList.add('modal-open');
+  }
+  refreshExportDimensionUI();
+  updateExportButtons();
+  const focusables = getExportFocusableElements();
+  const autofocus = exportModal.querySelector('[data-export-autofocus]');
+  const focusTarget = autofocus instanceof HTMLElement && !autofocus.disabled && autofocus.offsetParent !== null
+    ? autofocus
+    : (focusables[0] || exportDialog);
+  requestAnimationFrame(() => {
+    if(exportDialog && typeof exportDialog.focus === 'function'){
+      exportDialog.focus();
+    }
+    if(focusTarget && typeof focusTarget.focus === 'function'){
+      focusTarget.focus();
+    }
+  });
+}
+
+function closeExportSettings(fallback){
+  if(!exportModal || !exportModalVisible) return;
+  exportModal.setAttribute('aria-hidden','true');
+  exportModal.hidden = true;
+  exportModalVisible = false;
+  if(document.body){
+    document.body.classList.remove('modal-open');
+  }
+  const preferred = fallback && typeof fallback.focus === 'function' ? fallback : null;
+  const last = lastFocusedBeforeExport && typeof lastFocusedBeforeExport.focus === 'function' ? lastFocusedBeforeExport : null;
+  const target = preferred || last || openExportButton;
+  if(target && typeof target.focus === 'function'){
+    setTimeout(() => target.focus(), 0);
+  }
+  lastFocusedBeforeExport = null;
+}
+
+function getExportFocusableElements(){
+  if(!exportDialog) return [];
+  const selectors = 'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+  return Array.from(exportDialog.querySelectorAll(selectors)).filter((el) => {
+    if(!(el instanceof HTMLElement)) return false;
+    if(el.hasAttribute('hidden')) return false;
+    const style = window.getComputedStyle(el);
+    if(style.visibility === 'hidden' || style.display === 'none') return false;
+    return el.offsetParent !== null || el === document.activeElement;
+  });
+}
+
+function handleExportFocusTrap(event){
+  const focusable = getExportFocusableElements();
+  if(!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if(event.shiftKey){
+    if(active === first || !exportDialog || !exportDialog.contains(active)){
+      event.preventDefault();
+      last.focus();
+    }
+  }else if(active === last){
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function bindPlaybackControl(){
@@ -1542,6 +1651,11 @@ function updateExportButtons(){
     if(busy) btn.setAttribute('aria-busy','true');
     else btn.removeAttribute('aria-busy');
   });
+  if(openExportButton){
+    const disableTrigger = jobActive;
+    openExportButton.disabled = disableTrigger;
+    openExportButton.setAttribute('aria-disabled', disableTrigger ? 'true' : 'false');
+  }
 }
 
 function setButtonBusy(btn, busy, label){
