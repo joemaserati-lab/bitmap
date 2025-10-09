@@ -1328,6 +1328,49 @@ function asciiBufferToLines(buffer, width, height, charset){
   return lines;
 }
 
+function adjustDimensionsForAspect(width, height, aspectWidth, aspectHeight){
+  const widthValue = typeof width === 'number' ? width : parseFloat(width);
+  const heightValue = typeof height === 'number' ? height : parseFloat(height);
+  const aspectWidthValue = typeof aspectWidth === 'number' ? aspectWidth : parseFloat(aspectWidth);
+  const aspectHeightValue = typeof aspectHeight === 'number' ? aspectHeight : parseFloat(aspectHeight);
+  let w = Math.max(1, Math.round(Number.isFinite(widthValue) ? widthValue : 0));
+  let h = Math.max(1, Math.round(Number.isFinite(heightValue) ? heightValue : 0));
+  const aw = Math.max(0, Math.round(Number.isFinite(aspectWidthValue) ? aspectWidthValue : 0));
+  const ah = Math.max(0, Math.round(Number.isFinite(aspectHeightValue) ? aspectHeightValue : 0));
+  if(aw > 0 && ah > 0){
+    const ratio = aw / ah;
+    const candidates = [];
+    const widthScale = aw > 0 ? (w / aw) : 0;
+    if(widthScale > 0 && Number.isFinite(widthScale)){
+      const scaledW = Math.max(1, Math.round(aw * widthScale));
+      const scaledH = Math.max(1, Math.round(ah * widthScale));
+      candidates.push({width: scaledW, height: scaledH, delta: Math.abs(scaledW - w) + Math.abs(scaledH - h)});
+    }
+    const heightScale = ah > 0 ? (h / ah) : 0;
+    if(heightScale > 0 && Number.isFinite(heightScale)){
+      const scaledW = Math.max(1, Math.round(aw * heightScale));
+      const scaledH = Math.max(1, Math.round(ah * heightScale));
+      candidates.push({width: scaledW, height: scaledH, delta: Math.abs(scaledW - w) + Math.abs(scaledH - h)});
+    }
+    if(!candidates.length){
+      const fallbackScale = Math.max(widthScale, heightScale, 1);
+      if(Number.isFinite(fallbackScale) && fallbackScale > 0){
+        const scaledW = Math.max(1, Math.round(aw * fallbackScale));
+        const scaledH = Math.max(1, Math.round(ah * fallbackScale));
+        candidates.push({width: scaledW, height: scaledH, delta: Math.abs(scaledW - w) + Math.abs(scaledH - h)});
+      }
+    }
+    if(candidates.length){
+      candidates.sort((a, b) => a.delta - b.delta);
+      const chosen = candidates[0];
+      w = chosen.width;
+      h = chosen.height;
+    }
+    return {width: w, height: h, ratio};
+  }
+  return {width: w, height: h, ratio: h>0 ? w/h : 1};
+}
+
 function createFrameData(result, options){
   if(!result){
     return null;
@@ -1336,6 +1379,9 @@ function createFrameData(result, options){
   const outputWidth = Math.round(result.outputWidth || (result.gridWidth * tile));
   const outputHeight = Math.round(result.outputHeight || (result.gridHeight * tile));
   const kind = result.kind || (result.ascii ? 'ascii' : 'mask');
+  const aspectWidth = result.aspectWidth || state.sourceWidth || state.lastSize.width || outputWidth;
+  const aspectHeight = result.aspectHeight || state.sourceHeight || state.lastSize.height || outputHeight;
+  const adjusted = adjustDimensionsForAspect(outputWidth, outputHeight, aspectWidth, aspectHeight);
   if(kind === 'ascii'){
     const charsetKey = result.charsetKey || result.charset || options.mode || 'ascii_simple';
     const asciiArray = ensureASCIIArray(result.ascii);
@@ -1347,8 +1393,8 @@ function createFrameData(result, options){
       ? result.lines
       : asciiBufferToLines(asciiArray, result.gridWidth, result.gridHeight, effectiveCharset);
     const effectiveTile = Math.max(tile, ASCII_MIN_TILE);
-    const finalWidth = Math.round(result.outputWidth || (result.gridWidth * effectiveTile));
-    const finalHeight = Math.round(result.outputHeight || (result.gridHeight * effectiveTile));
+    const finalWidth = adjusted.width;
+    const finalHeight = adjusted.height;
     const normalizedCharsetString = charsetKey === 'ascii_custom'
       ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
       : effectiveCharset.join('');
@@ -1363,6 +1409,9 @@ function createFrameData(result, options){
       charsetString: normalizedCharsetString,
       outputWidth: finalWidth,
       outputHeight: finalHeight,
+      aspectWidth,
+      aspectHeight,
+      aspectRatio: adjusted.ratio,
       mode: result.mode || options.mode || 'ascii_simple'
     };
   }
@@ -1372,8 +1421,11 @@ function createFrameData(result, options){
     gridHeight: result.gridHeight,
     tile,
     mask: result.mask,
-    outputWidth,
-    outputHeight,
+    outputWidth: adjusted.width,
+    outputHeight: adjusted.height,
+    aspectWidth,
+    aspectHeight,
+    aspectRatio: adjusted.ratio,
     mode: result.mode || options.mode || 'none'
   };
 }
@@ -1465,15 +1517,16 @@ function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}){
   return svg;
 }
 
-function buildAsciiSVGString(frame, tile, options){
-  const unit = tile || 1;
-  const svgW = Math.max(1, Math.round(frame.gridWidth * unit));
-  const svgH = Math.max(1, Math.round(frame.gridHeight * unit));
+function buildAsciiSVGString(frame, options){
+  const width = Math.max(1, Math.round(frame.outputWidth || (frame.gridWidth * (frame.tile || 1))));
+  const height = Math.max(1, Math.round(frame.outputHeight || (frame.gridHeight * (frame.tile || 1))));
+  const cellWidth = width / Math.max(1, frame.gridWidth);
+  const cellHeight = height / Math.max(1, frame.gridHeight);
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
-  const textMarkup = asciiLinesToSVGTexts(lines, unit);
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight);
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
   if(options.bg && options.bg !== 'transparent'){
     svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
   }
@@ -1481,13 +1534,13 @@ function buildAsciiSVGString(frame, tile, options){
     svg += '</svg>';
     return svg;
   }
-  const fontSize = Math.max(unit * 0.85, 6);
+  const fontSize = Math.max(2, Math.min(cellWidth, cellHeight) * 0.92);
   const fgColor = options.fg || '#000000';
   const glowAmount = Math.max(0, options.glow || 0);
   if(glowAmount > 0){
     const fgRGB = hexToRGB(fgColor);
     const glowRGB = lightenColor(fgRGB, 0.4);
-    const blurRadius = Math.max(0.2, Math.sqrt(unit*unit) * (0.4 + glowAmount/90));
+    const blurRadius = Math.max(0.2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.4 + glowAmount/90));
     const glowOpacity = Math.min(1, 0.18 + glowAmount/120);
     svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
     svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
@@ -1497,12 +1550,13 @@ function buildAsciiSVGString(frame, tile, options){
   return svg;
 }
 
-function asciiLinesToSVGTexts(lines, unit){
+function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
   if(!lines || !lines.length){
     return '';
   }
-  const x = unit * 0.1;
-  const baseline = unit * 0.82;
+  const x = Math.max(0, cellWidth * 0.1);
+  const baseline = cellHeight * 0.5;
+  const lineStep = cellHeight;
   let markup = '';
   for(let i=0;i<lines.length;i++){
     const raw = lines[i];
@@ -1511,8 +1565,8 @@ function asciiLinesToSVGTexts(lines, unit){
     if(!trimmed){
       continue;
     }
-    const y = baseline + i*unit;
-    markup += `<text x="${formatNumber(x)}" y="${formatNumber(y)}" xml:space="preserve">${escapeXML(trimmed)}</text>`;
+    const y = baseline + i*lineStep;
+    markup += `<text x="${formatNumber(x)}" y="${formatNumber(y)}" xml:space="preserve" dominant-baseline="middle">${escapeXML(trimmed)}</text>`;
   }
   return markup;
 }
@@ -1523,7 +1577,7 @@ function buildExportSVG(result, options){
   if(!frame) return '';
   const tile = frame.tile != null ? frame.tile : Math.max(1, options.px);
   if(frame.kind === 'ascii'){
-    return buildAsciiSVGString(frame, tile, options);
+    return buildAsciiSVGString(frame, options);
   }
   return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
 }
@@ -1587,9 +1641,17 @@ function updatePlaybackButton(show, playing){
   }
 }
 
-function startPreviewAnimation(canvas, data){
+function startPreviewAnimation(canvas, data, width, height, dpr){
   const ctx = canvas.getContext('2d', {alpha: !data.bg || data.bg === 'transparent'});
   if(!ctx || !data.frames || !data.frames.length) return;
+  if(typeof ctx.resetTransform === 'function'){
+    ctx.resetTransform();
+  }else{
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+  if(dpr && dpr !== 1){
+    ctx.scale(dpr, dpr);
+  }
   const player = {
     canvas,
     ctx,
@@ -1598,7 +1660,9 @@ function startPreviewAnimation(canvas, data){
     accumulator: 0,
     lastTime: 0,
     playing: true,
-    rafId: 0
+    rafId: 0,
+    width,
+    height
   };
   state.previewPlayer = player;
   updatePlaybackButton(true, true);
@@ -1635,7 +1699,7 @@ function drawAnimationFrame(player, index){
     fg: player.data.fg,
     glow: player.data.glow
   };
-  paintFrame(player.ctx, frameData, player.canvas.width, player.canvas.height);
+  paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
 }
 
 function renderPreview(previewData, scale){
@@ -1651,25 +1715,30 @@ function renderPreview(previewData, scale){
   const dims = computePreviewDimensions(previewData.width, previewData.height, scale);
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
   if(previewData.type === 'mask' || previewData.type === 'ascii'){
     const canvas = document.createElement('canvas');
-    canvas.width = previewData.width;
-    canvas.height = previewData.height;
-    drawPreviewFrame(canvas, previewData);
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
+    const cssWidth = Math.max(1, dims.width);
+    const cssHeight = Math.max(1, dims.height);
+    canvas.width = Math.max(1, Math.round(cssWidth * dpr));
+    canvas.height = Math.max(1, Math.round(cssHeight * dpr));
+    drawPreviewFrame(canvas, previewData, cssWidth, cssHeight, dpr);
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
     canvas.style.imageRendering = 'pixelated';
     frame.appendChild(canvas);
     updatePlaybackButton(false);
   }else if(previewData.type === 'animation'){
     const canvas = document.createElement('canvas');
-    canvas.width = previewData.width;
-    canvas.height = previewData.height;
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
+    const cssWidth = Math.max(1, dims.width);
+    const cssHeight = Math.max(1, dims.height);
+    canvas.width = Math.max(1, Math.round(cssWidth * dpr));
+    canvas.height = Math.max(1, Math.round(cssHeight * dpr));
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
     canvas.style.imageRendering = 'pixelated';
     frame.appendChild(canvas);
-    startPreviewAnimation(canvas, previewData);
+    startPreviewAnimation(canvas, previewData, cssWidth, cssHeight, dpr);
   }
   preview.appendChild(frame);
 }
@@ -1690,7 +1759,6 @@ function paintFrame(ctx, data, outWidth, outHeight){
 function paintMask(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   ctx.save();
-  ctx.setTransform(1,0,0,1,0,0);
   ctx.imageSmoothingEnabled = false;
   const bg = data.bg;
   if(bg && bg !== 'transparent'){
@@ -1748,7 +1816,6 @@ function paintMask(ctx, data, outWidth, outHeight){
 function paintAscii(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   ctx.save();
-  ctx.setTransform(1,0,0,1,0,0);
   const bg = data.bg;
   if(bg && bg !== 'transparent'){
     ctx.fillStyle = bg;
@@ -1765,7 +1832,8 @@ function paintAscii(ctx, data, outWidth, outHeight){
   }
   const cellWidth = outWidth / gridWidth;
   const cellHeight = outHeight / gridHeight;
-  const fontSize = Math.max(6, cellHeight * 0.85);
+  const baseSize = Math.min(cellWidth, cellHeight);
+  const fontSize = Math.max(2, baseSize * 0.92);
   ctx.font = `${fontSize}px ${ASCII_FONT_STACK}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1792,13 +1860,13 @@ function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cell
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
-    const posY = y*cellHeight + offsetY;
+    const posY = Math.round((y*cellHeight + offsetY) * 10) / 10;
     for(let x=0;x<gridWidth;x++){
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
       }
-      const posX = x*cellWidth + offsetX;
+      const posX = Math.round((x*cellWidth + offsetX) * 10) / 10;
       ctx.fillText(ch, posX, posY);
     }
   }
@@ -1852,11 +1920,19 @@ function lightenColor([r,g,b], amount){
   ];
 }
 
-function drawPreviewFrame(canvas, data){
+function drawPreviewFrame(canvas, data, width, height, dpr){
   const alpha = !data.bg || data.bg === 'transparent';
   const ctx = canvas.getContext('2d', {alpha});
   if(!ctx) return;
-  paintFrame(ctx, data, canvas.width, canvas.height);
+  if(typeof ctx.resetTransform === 'function'){
+    ctx.resetTransform();
+  }else{
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+  if(dpr && dpr !== 1){
+    ctx.scale(dpr, dpr);
+  }
+  paintFrame(ctx, data, width, height);
 }
 
 function schedulePreviewRefresh(){

@@ -140,8 +140,15 @@ function processImage(options){
   }
   prepareBaseGray();
   const pixelSize = Math.max(1, Math.round(options.pixelSize||10));
-  const baseWidth = Math.max(1, Math.round(sourceWidth / pixelSize));
-  const baseHeight = Math.max(1, Math.round(sourceHeight / pixelSize));
+  const targetWidth = sourceWidth > 0 ? (sourceWidth / pixelSize) : 0;
+  const targetHeight = sourceHeight > 0 ? (sourceHeight / pixelSize) : 0;
+  let baseWidth = Math.max(1, Math.round(targetWidth));
+  let baseHeight = Math.max(1, Math.round(targetHeight));
+  if(sourceWidth > 0 && sourceHeight > 0){
+    const refined = refineGridSize(baseWidth, baseHeight, targetWidth, targetHeight, sourceWidth / sourceHeight);
+    baseWidth = refined.width;
+    baseHeight = refined.height;
+  }
   const total = baseWidth*baseHeight;
   const base = ensureGridBase(baseWidth, baseHeight);
   const working = new Float32Array(base);
@@ -193,7 +200,9 @@ function processImage(options){
       tile: asciiTile,
       ascii: ascii.data,
       charsetKey: ascii.key,
-      charsetString: ascii.charsetString
+      charsetString: ascii.charsetString,
+      aspectWidth: sourceWidth,
+      aspectHeight: sourceHeight
     };
   }
 
@@ -231,8 +240,37 @@ function processImage(options){
     outputWidth: Math.round(baseWidth*pixelSize),
     outputHeight: Math.round(baseHeight*pixelSize),
     tile,
-    mask
+    mask,
+    aspectWidth: sourceWidth,
+    aspectHeight: sourceHeight
   };
+}
+
+function refineGridSize(widthGuess, heightGuess, targetWidth, targetHeight, ratio){
+  let bestWidth = Math.max(1, widthGuess);
+  let bestHeight = Math.max(1, heightGuess);
+  let bestScore = score(bestWidth, bestHeight);
+  for(let dw=-3; dw<=3; dw++){
+    for(let dh=-3; dh<=3; dh++){
+      const candidateW = Math.max(1, widthGuess + dw);
+      const candidateH = Math.max(1, heightGuess + dh);
+      const candidateScore = score(candidateW, candidateH);
+      if(candidateScore < bestScore){
+        bestScore = candidateScore;
+        bestWidth = candidateW;
+        bestHeight = candidateH;
+      }
+    }
+  }
+  return {width: bestWidth, height: bestHeight};
+
+  function score(w, h){
+    const ratioVal = h > 0 ? w / h : ratio;
+    const ratioError = ratio > 0 ? Math.abs(ratioVal - ratio) : 0;
+    const widthError = Math.abs(w - targetWidth);
+    const heightError = Math.abs(h - targetHeight);
+    return (ratioError * 1000) + widthError + heightError;
+  }
 }
 
 function asciiDither(gray, width, height, invert, key, customString){
