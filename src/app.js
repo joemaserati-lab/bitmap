@@ -1457,7 +1457,7 @@ function createFrameData(result, options){
   }
   if(kind === 'thermal'){
     const indexes = ensureUint8Array(result.indexes);
-    const palette = resolvePaletteFromResult(result);
+    const palette = ensureUint8Array(result.palette);
     return {
       kind: 'thermal',
       gridWidth: result.gridWidth,
@@ -1465,7 +1465,6 @@ function createFrameData(result, options){
       tile,
       indexes,
       palette,
-      paletteKey: result.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined),
       outputWidth: adjusted.width,
       outputHeight: adjusted.height,
       aspectWidth,
@@ -1511,7 +1510,6 @@ function buildPreviewData(frame, options){
     };
   }
   if(frame.kind === 'thermal'){
-    const palette = frame.palette || (frame.paletteKey ? PALETTE_LIBRARY[frame.paletteKey] : null);
     return {
       type: 'thermal',
       mode: frame.mode,
@@ -1521,8 +1519,7 @@ function buildPreviewData(frame, options){
       gridHeight: frame.gridHeight,
       tile: frame.tile,
       indexes: frame.indexes,
-      palette,
-      paletteKey: frame.paletteKey,
+      palette: frame.palette,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
