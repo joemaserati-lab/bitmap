@@ -66,6 +66,13 @@ const PALETTE_LIBRARY = {
   [THERMAL_PALETTE_KEY]: THERMAL_PALETTE
 };
 
+function getPaletteByKey(key){
+  if(!key) return null;
+  if(PALETTE_LIBRARY[key]) return PALETTE_LIBRARY[key];
+  if(key === THERMAL_PALETTE_KEY) return THERMAL_PALETTE;
+  return null;
+}
+
 const ASCII_FONT_STACK = 'IBM Plex Mono, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace';
 
 const state = {
@@ -1405,8 +1412,12 @@ function resolvePaletteFromResult(result){
     const paletteArray = ensureUint8Array(result.palette);
     if(paletteArray && paletteArray.length) return paletteArray;
   }
-  if(result.paletteKey && PALETTE_LIBRARY[result.paletteKey]){
-    return PALETTE_LIBRARY[result.paletteKey];
+  if(result.paletteKey){
+    const palette = getPaletteByKey(result.paletteKey);
+    if(palette) return palette;
+  }
+  if(result.kind === 'thermal' || result.mode === 'thermal'){
+    return THERMAL_PALETTE;
   }
   return null;
 }
@@ -1457,7 +1468,11 @@ function createFrameData(result, options){
   }
   if(kind === 'thermal'){
     const indexes = ensureUint8Array(result.indexes);
-    const palette = ensureUint8Array(result.palette);
+    let palette = resolvePaletteFromResult(result);
+    if(!palette){
+      palette = THERMAL_PALETTE;
+    }
+    const paletteKey = result.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined);
     return {
       kind: 'thermal',
       gridWidth: result.gridWidth,
@@ -1465,6 +1480,7 @@ function createFrameData(result, options){
       tile,
       indexes,
       palette,
+      paletteKey,
       outputWidth: adjusted.width,
       outputHeight: adjusted.height,
       aspectWidth,
@@ -1510,6 +1526,7 @@ function buildPreviewData(frame, options){
     };
   }
   if(frame.kind === 'thermal'){
+    const palette = frame.palette || getPaletteByKey(frame.paletteKey) || THERMAL_PALETTE;
     return {
       type: 'thermal',
       mode: frame.mode,
@@ -1519,7 +1536,8 @@ function buildPreviewData(frame, options){
       gridHeight: frame.gridHeight,
       tile: frame.tile,
       indexes: frame.indexes,
-      palette: frame.palette,
+      palette,
+      paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined),
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -1591,12 +1609,13 @@ function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}){
   return svg;
 }
 
-function buildIndexedSVGString(indexes, width, height, tile, palette, bg){
-  if(!indexes || !palette) return '';
+function buildIndexedSVGString(indexes, width, height, tile, palette, bg, paletteKey){
+  const effectivePalette = palette || getPaletteByKey(paletteKey) || THERMAL_PALETTE;
+  if(!indexes || !effectivePalette) return '';
   const unit = tile || 1;
   const svgW = Math.max(1, Math.round(width * unit));
   const svgH = Math.max(1, Math.round(height * unit));
-  const paletteSize = palette.length / 3;
+  const paletteSize = effectivePalette.length / 3;
   const paths = new Array(paletteSize).fill('');
   for(let y=0;y<height;y++){
     const rowOffset = y*width;
@@ -1631,9 +1650,9 @@ function buildIndexedSVGString(indexes, width, height, tile, palette, bg){
     let color = colorCache[i];
     if(!color){
       const base = i*3;
-      const r = palette[base];
-      const g = palette[base+1];
-      const b = palette[base+2];
+      const r = effectivePalette[base];
+      const g = effectivePalette[base+1];
+      const b = effectivePalette[base+2];
       color = `rgb(${r},${g},${b})`;
       colorCache[i] = color;
     }
@@ -1710,7 +1729,7 @@ function buildExportSVG(result, options){
     return buildAsciiSVGString(frame, options);
   }
   if(frame.kind === 'thermal'){
-    return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg);
+    return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg, frame.paletteKey);
   }
   return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
 }
@@ -1960,7 +1979,7 @@ function paintThermal(ctx, data, outWidth, outHeight){
     ctx.clearRect(0, 0, outWidth, outHeight);
   }
   const indexes = data.indexes;
-  const palette = data.palette;
+  const palette = data.palette || getPaletteByKey(data.paletteKey) || THERMAL_PALETTE;
   if(!indexes || !palette) {
     ctx.restore();
     return;
@@ -2504,7 +2523,7 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
   }
   const tile = frame.tile != null ? frame.tile : options.px;
   if(frame.kind === 'thermal'){
-    const palette = ensureUint8Array(frame.palette) || new Uint8Array(0);
+    const palette = ensureUint8Array(frame.palette) || getPaletteByKey(frame.paletteKey) || THERMAL_PALETTE;
     const indexes = resamplePaletteFrame(
       ensureUint8Array(frame.indexes),
       frame.gridWidth,
@@ -2513,7 +2532,7 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
       outHeight,
       tile
     );
-    return {indexes, palette, transparentIndex: -1};
+    return {indexes, palette, transparentIndex: -1, paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined)};
   }
   if(frame.kind === 'ascii'){
     const indexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);

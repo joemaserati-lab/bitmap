@@ -14,6 +14,7 @@ let baseGrid = null;
 let lastGridWidth = 0;
 let lastGridHeight = 0;
 
+const THERMAL_PALETTE_KEY = 'thermal_v1';
 const THERMAL_PALETTE = new Uint8Array([
   0, 0, 0,
   20, 0, 80,
@@ -238,7 +239,7 @@ function processImage(options){
       outputHeight: Math.round(baseHeight*pixelSize),
       tile: pixelSize,
       indexes: thermal.indexes,
-      palette: thermal.palette,
+      paletteKey: thermal.paletteKey,
       aspectWidth: sourceWidth,
       aspectHeight: sourceHeight
     };
@@ -519,7 +520,7 @@ function thermalPixelize(gray, width, height, invert){
   const indexes = new Uint8Array(total);
   const paletteSize = THERMAL_PALETTE.length / 3;
   if(paletteSize <= 0){
-    return {indexes, palette: THERMAL_PALETTE.slice(0)};
+    return {indexes, paletteKey: THERMAL_PALETTE_KEY};
   }
   for(let y=0;y<height;y++){
     for(let x=0;x<width;x++){
@@ -540,7 +541,7 @@ function thermalPixelize(gray, width, height, invert){
       indexes[idx] = paletteIndex;
     }
   }
-  return {indexes, palette: THERMAL_PALETTE.slice(0)};
+  return {indexes, paletteKey: THERMAL_PALETTE_KEY};
 }
 
 function crosshatchDither(gray, width, height, threshold, invert){
