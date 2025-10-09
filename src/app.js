@@ -42,6 +42,30 @@ const ASCII_CHARSETS = {
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
 };
 
+const THERMAL_PALETTE_KEY = 'thermal_v1';
+const THERMAL_PALETTE = new Uint8Array([
+  0, 0, 0,
+  20, 0, 80,
+  0, 0, 155,
+  0, 60, 200,
+  0, 110, 255,
+  0, 170, 255,
+  0, 220, 255,
+  0, 255, 200,
+  50, 255, 120,
+  160, 255, 70,
+  220, 220, 0,
+  255, 170, 0,
+  255, 90, 0,
+  255, 0, 0,
+  200, 0, 0,
+  255, 255, 255
+]);
+
+const PALETTE_LIBRARY = {
+  [THERMAL_PALETTE_KEY]: THERMAL_PALETTE
+};
+
 const ASCII_FONT_STACK = 'IBM Plex Mono, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace';
 
 const state = {
@@ -1373,6 +1397,18 @@ function adjustDimensionsForAspect(width, height, aspectWidth, aspectHeight){
     return {width: w, height: h, ratio};
   }
   return {width: w, height: h, ratio: h>0 ? w/h : 1};
+}
+
+function resolvePaletteFromResult(result){
+  if(!result) return null;
+  if(result.palette){
+    const paletteArray = ensureUint8Array(result.palette);
+    if(paletteArray && paletteArray.length) return paletteArray;
+  }
+  if(result.paletteKey && PALETTE_LIBRARY[result.paletteKey]){
+    return PALETTE_LIBRARY[result.paletteKey];
+  }
+  return null;
 }
 
 function createFrameData(result, options){
