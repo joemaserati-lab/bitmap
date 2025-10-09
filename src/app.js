@@ -15,7 +15,7 @@ const CONTROL_IDS = [
   'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
   'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
   'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
-  'dither','asciiChars','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
+  'dither','asciiChars','asciiWords','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
   'jpegQ','jpegQNum','rasterBG'
 ];
 
@@ -36,6 +36,8 @@ const OFFSCREEN_SUPPORTED = typeof OffscreenCanvas !== 'undefined';
 const DEFAULT_ASCII_CUSTOM = ' .:-=+*#%@';
 const ASCII_MIN_TILE = 8;
 const ASCII_CUSTOM_MAX = 64;
+const DEFAULT_ASCII_WORDS = 'PIXEL, ART';
+const ASCII_WORD_MAX = 32;
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
@@ -107,7 +109,9 @@ const state = {
   sourceOffscreen: null,
   videoSource: null,
   previewPlayer: null,
-  customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM)
+  customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM),
+  customASCIIWords: normalizeASCIIWordsString(DEFAULT_ASCII_WORDS),
+  customASCIIWordList: parseASCIIWordList(DEFAULT_ASCII_WORDS)
 };
 
 let renderQueued = false;
@@ -126,6 +130,9 @@ function init(){
   bindPlaybackControl();
   if(controls.asciiChars){
     controls.asciiChars.value = state.customASCIIString;
+  }
+  if(controls.asciiWords){
+    controls.asciiWords.value = state.customASCIIWords;
   }
   updateAsciiCustomVisibility();
   window.addEventListener('resize', () => {
@@ -231,6 +238,10 @@ function bindControls(){
     controls.asciiChars.addEventListener('input', handleCustomASCIIInput);
     controls.asciiChars.addEventListener('blur', syncCustomASCIIInput);
   }
+  if(controls.asciiWords){
+    controls.asciiWords.addEventListener('input', handleASCIIWordsInput);
+    controls.asciiWords.addEventListener('blur', syncASCIIWordsInput);
+  }
   const changeIds = ['dither','invert','bg','fg','style','fmt','dpi','lockAR'];
   for(const id of changeIds){
     const el = controls[id];
@@ -261,9 +272,14 @@ function bindControls(){
 
 function updateAsciiCustomVisibility(){
   const field = $('asciiCustomField');
-  if(!field) return;
+  const wordField = $('asciiWordField');
   const mode = controls.dither ? controls.dither.value : 'none';
-  field.hidden = mode !== 'ascii_custom';
+  if(field){
+    field.hidden = mode !== 'ascii_custom';
+  }
+  if(wordField){
+    wordField.hidden = mode !== 'ascii_word';
+  }
 }
 
 function handleCustomASCIIInput(){
@@ -283,6 +299,27 @@ function syncCustomASCIIInput(){
   state.customASCIIString = normalized;
   if(controls.asciiChars.value !== normalized){
     controls.asciiChars.value = normalized;
+  }
+}
+
+function handleASCIIWordsInput(){
+  if(!controls.asciiWords) return;
+  const normalized = normalizeASCIIWords(controls.asciiWords.value);
+  const prev = state.customASCIIWords;
+  state.customASCIIWords = normalized.string;
+  state.customASCIIWordList = normalized.list;
+  if(normalized.string !== prev){
+    fastRender();
+  }
+}
+
+function syncASCIIWordsInput(){
+  if(!controls.asciiWords) return;
+  const normalized = normalizeASCIIWords(controls.asciiWords.value);
+  state.customASCIIWords = normalized.string;
+  state.customASCIIWordList = normalized.list;
+  if(controls.asciiWords.value !== normalized.string){
+    controls.asciiWords.value = normalized.string;
   }
 }
 
@@ -1155,6 +1192,32 @@ function normalizeCustomASCIIString(input){
   return chars.join('');
 }
 
+function normalizeASCIIWords(input){
+  const raw = typeof input === 'string' ? input : '';
+  const cleaned = raw.replace(/\r/g, '');
+  const parts = cleaned.split(/[\n,]+/).map((word) => word.trim()).filter(Boolean);
+  if(parts.length === 0){
+    parts.push('PIXEL');
+  }
+  if(parts.length > ASCII_WORD_MAX){
+    parts.length = ASCII_WORD_MAX;
+  }
+  const display = parts.join(', ');
+  const list = parts.slice();
+  if(!list.includes(' ')){
+    list.unshift(' ');
+  }
+  return {string: display, list};
+}
+
+function normalizeASCIIWordsString(input){
+  return normalizeASCIIWords(input).string;
+}
+
+function parseASCIIWordList(input){
+  return normalizeASCIIWords(input).list;
+}
+
 function collectRenderOptions(){
   const px = clampInt(controls.pixelSize.value||10, 2, 200);
   const thr = clampInt(controls.threshold.value||180, 0, 255);
@@ -1175,7 +1238,8 @@ function collectRenderOptions(){
   const scaleVal = parseFloat(controls.scale.value||'1');
   const scale = Number.isFinite(scaleVal) && scaleVal>0 ? scaleVal : 1;
   const asciiCustom = state.customASCIIString;
-  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom};
+  const asciiWords = state.customASCIIWords;
+  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom, asciiWords};
 }
 
 function buildWorkerOptions(options){
@@ -1193,7 +1257,8 @@ function buildWorkerOptions(options){
     thickness: options.thick,
     dither: options.mode,
     invertMode: options.invertMode,
-    asciiCustom: options.asciiCustom
+    asciiCustom: options.asciiCustom,
+    asciiWords: options.asciiWords
   };
 }
 
@@ -1234,6 +1299,8 @@ async function generate(){
     result.outputWidth = frameData.outputWidth;
     result.outputHeight = frameData.outputHeight;
     result.ascii = frameData.ascii;
+    if(frameData.colors) result.colors = frameData.colors;
+    if(frameData.wordList) result.wordList = frameData.wordList;
   }
   state.lastResult = {type: 'image', options, frame: result, frameData};
   state.lastResultId = jobId;
@@ -1325,6 +1392,12 @@ function getASCIICharset(key, customString){
   if(key === 'ascii_custom'){
     const normalized = normalizeCustomASCIIString(typeof customString === 'string' ? customString : state.customASCIIString);
     return Array.from(normalized);
+  }
+  if(key === 'ascii_word'){
+    if(typeof customString === 'string' && customString.length){
+      return customString.split('\n').map((word) => word);
+    }
+    return state.customASCIIWordList.slice();
   }
   return ASCII_CHARSETS[key] || ASCII_CHARSETS.ascii_simple;
 }
@@ -1438,7 +1511,9 @@ function createFrameData(result, options){
     const asciiArray = ensureASCIIArray(result.ascii);
     const charsetString = typeof result.charsetString === 'string'
       ? result.charsetString
-      : (charsetKey === 'ascii_custom' ? options.asciiCustom : '');
+      : (charsetKey === 'ascii_custom'
+        ? options.asciiCustom
+        : (charsetKey === 'ascii_word' ? state.customASCIIWordList.join('\n') : ''));
     const effectiveCharset = getASCIICharset(charsetKey, charsetString);
     const lines = result.lines && result.lines.length
       ? result.lines
@@ -1448,7 +1523,13 @@ function createFrameData(result, options){
     const finalHeight = adjusted.height;
     const normalizedCharsetString = charsetKey === 'ascii_custom'
       ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
-      : effectiveCharset.join('');
+      : (charsetKey === 'ascii_word'
+        ? (charsetString || state.customASCIIWordList.join('\n'))
+        : effectiveCharset.join(''));
+    const colors = result.colors ? ensureUint8Array(result.colors) : null;
+    const wordList = result.wordList && result.wordList.length
+      ? result.wordList.slice()
+      : (charsetKey === 'ascii_word' ? effectiveCharset.slice() : undefined);
     return {
       kind: 'ascii',
       gridWidth: result.gridWidth,
@@ -1458,6 +1539,8 @@ function createFrameData(result, options){
       lines,
       charsetKey,
       charsetString: normalizedCharsetString,
+      colors,
+      wordList,
       outputWidth: finalWidth,
       outputHeight: finalHeight,
       aspectWidth,
@@ -1520,6 +1603,8 @@ function buildPreviewData(frame, options){
       lines: frame.lines,
       charsetKey: frame.charsetKey,
       charsetString: frame.charsetString,
+      colors: frame.colors,
+      wordList: frame.wordList,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -1671,9 +1756,15 @@ function buildAsciiSVGString(frame, options){
     ? frame.lines
     : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
   const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight);
+  const colorMarkup = frame.mode === 'ascii_pixel' && frame.colors
+    ? asciiPixelColorsToSVG(frame.colors, frame.gridWidth, frame.gridHeight, cellWidth, cellHeight)
+    : '';
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
   if(options.bg && options.bg !== 'transparent'){
     svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
+  }
+  if(colorMarkup){
+    svg += `<g>${colorMarkup}</g>`;
   }
   if(!textMarkup){
     svg += '</svg>';
@@ -1708,13 +1799,35 @@ function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
     const line = lines[y];
     if(!line) continue;
     const baseY = offsetY + y*stepY;
-    for(let x=0;x<line.length;x++){
-      const ch = line.charAt(x);
-      if(!ch || ch === ' '){
+    const limit = asciiLineLength(line);
+    for(let x=0;x<limit;x++){
+      const token = asciiTokenAt(line, x);
+      if(!isAsciiTokenVisible(token)){
         continue;
       }
       const baseX = offsetX + x*stepX;
-      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle">${escapeXML(ch)}</text>`;
+      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle">${escapeXML(token)}</text>`;
+    }
+  }
+  return markup;
+}
+
+function asciiPixelColorsToSVG(colors, gridWidth, gridHeight, cellWidth, cellHeight){
+  const colorArray = ensureUint8Array(colors);
+  if(!colorArray || colorArray.length < gridWidth * gridHeight * 3){
+    return '';
+  }
+  let markup = '';
+  for(let y=0;y<gridHeight;y++){
+    const rowOffset = y * gridWidth;
+    const baseY = y * cellHeight;
+    for(let x=0;x<gridWidth;x++){
+      const base = (rowOffset + x) * 3;
+      const r = colorArray[base];
+      const g = colorArray[base + 1];
+      const b = colorArray[base + 2];
+      const baseX = x * cellWidth;
+      markup += `<rect x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" width="${formatNumber(cellWidth)}" height="${formatNumber(cellHeight)}" fill="rgb(${r},${g},${b})"/>`;
     }
   }
   return markup;
@@ -2045,6 +2158,25 @@ function paintAscii(ctx, data, outWidth, outHeight){
   ctx.imageSmoothingEnabled = false;
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
+  let colorGrid = null;
+  if(data.mode === 'ascii_pixel' && data.colors){
+    const rawColors = ensureUint8Array(data.colors);
+    if(rawColors && rawColors.length >= gridWidth * gridHeight * 3){
+      colorGrid = rawColors;
+      for(let y=0;y<gridHeight;y++){
+        const rowOffset = y * gridWidth;
+        const drawY = y * cellHeight;
+        for(let x=0;x<gridWidth;x++){
+          const base = (rowOffset + x) * 3;
+          const r = colorGrid[base];
+          const g = colorGrid[base + 1];
+          const b = colorGrid[base + 2];
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(x * cellWidth, drawY, cellWidth, cellHeight);
+        }
+      }
+    }
+  }
   const glowAmount = Math.max(0, data.glow || 0);
   if(glowAmount > 0){
     const fgRGB = hexToRGB(data.fg || '#000000');
@@ -2061,18 +2193,42 @@ function paintAscii(ctx, data, outWidth, outHeight){
   ctx.restore();
 }
 
+function asciiLineLength(line){
+  if(Array.isArray(line)) return line.length;
+  if(typeof line === 'string') return line.length;
+  return 0;
+}
+
+function asciiTokenAt(line, index){
+  if(Array.isArray(line)){
+    const value = line[index];
+    return value != null ? String(value) : '';
+  }
+  if(typeof line === 'string'){
+    return line.charAt(index);
+  }
+  return '';
+}
+
+function isAsciiTokenVisible(token){
+  if(!token) return false;
+  if(typeof token !== 'string') return true;
+  return token.trim().length > 0;
+}
+
 function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight){
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
+    const limit = Math.min(gridWidth, asciiLineLength(line));
     const posY = Math.round((y*cellHeight + offsetY) * 10) / 10;
-    for(let x=0;x<gridWidth;x++){
-      const ch = line.charAt(x);
-      if(!ch || ch === ' '){
+    for(let x=0;x<limit;x++){
+      const token = asciiTokenAt(line, x);
+      if(!isAsciiTokenVisible(token)){
         continue;
       }
       const posX = Math.round((x*cellWidth + offsetX) * 10) / 10;
-      ctx.fillText(ch, posX, posY);
+      ctx.fillText(token, posX, posY);
     }
   }
 }
