@@ -38,6 +38,9 @@ body{display:flex;flex-direction:column;min-height:100dvh}
 .controls-body{flex:1 1 auto;display:flex;flex-direction:row;gap:16px;overflow-x:auto;overflow-y:hidden;padding:0 calc(6px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(6px + var(--safe-left));scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
 .controls-body::-webkit-scrollbar{height:6px}
 .control-section{display:flex;flex-direction:column;gap:12px;padding:14px;border-radius:18px;border:1px solid #e6e6e6;background:var(--chip-bg);flex:0 0 100%;min-width:100%;scroll-snap-align:start}
+.control-section__fields{display:flex;flex-direction:row;gap:12px;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
+.control-section__fields::-webkit-scrollbar{height:6px}
+.control-section__fields .field{flex:0 0 100%;min-width:100%;scroll-snap-align:start}
 .section-title{margin:0;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
 .field{flex:0 0 auto;min-width:0;width:100%;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .field[hidden]{display:none!important}
@@ -101,6 +104,8 @@ hr{border:0;border-top:1px solid #eee;margin:0;flex:0 0 auto;align-self:stretch;
   .controls-body::-webkit-scrollbar{width:8px;height:auto}
   .controls-body::-webkit-scrollbar-thumb{background:#ccc;border-radius:999px}
   .control-section{background:transparent;border:0;padding:0;gap:14px;flex:1 0 auto;min-width:0;scroll-snap-align:none}
+  .control-section__fields{flex-direction:column;overflow:visible;padding:0;scroll-snap-type:none}
+  .control-section__fields .field{flex:0 0 auto;min-width:0}
   .control-section .field{background:var(--chip-bg)}
   .btn-row{flex-wrap:wrap}
 }

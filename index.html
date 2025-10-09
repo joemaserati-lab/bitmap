@@ -44,37 +44,45 @@
     <div class="controls-body">
       <section class="control-section">
         <h2 class="section-title">PIXEL</h2>
-        <div class="field"><label>PIXEL SIZE</label><div class="slider"><input id="pixelSize" type="range" min="2" max="200" step="1" value="10"><input id="pixelSizeNum" class="num" type="number" min="2" max="200" step="1" value="10"></div></div>
-        <div class="field"><label>THRESHOLD</label><div class="slider"><input id="threshold" type="range" min="0" max="255" step="1" value="180"><input id="thresholdNum" class="num" type="number" min="0" max="255" step="1" value="180"></div></div>
-        <div class="field"><label>BLUR</label><div class="slider"><input id="blur" type="range" min="0" max="30" step="0.5" value="0"><input id="blurNum" class="num" type="number" min="0" max="30" step="0.5" value="0"></div></div>
-        <div class="field"><label>GRAIN</label><div class="slider"><input id="grain" type="range" min="0" max="100" step="1" value="0"><input id="grainNum" class="num" type="number" min="0" max="100" step="1" value="0"></div></div>
-        <div class="field"><label>GLOW</label><div class="slider"><input id="glow" type="range" min="0" max="100" step="1" value="0"><input id="glowNum" class="num" type="number" min="0" max="100" step="1" value="0"></div></div>
+        <div class="control-section__fields">
+          <div class="field"><label>PIXEL SIZE</label><div class="slider"><input id="pixelSize" type="range" min="2" max="200" step="1" value="10"><input id="pixelSizeNum" class="num" type="number" min="2" max="200" step="1" value="10"></div></div>
+          <div class="field"><label>THRESHOLD</label><div class="slider"><input id="threshold" type="range" min="0" max="255" step="1" value="180"><input id="thresholdNum" class="num" type="number" min="0" max="255" step="1" value="180"></div></div>
+          <div class="field"><label>BLUR</label><div class="slider"><input id="blur" type="range" min="0" max="30" step="0.5" value="0"><input id="blurNum" class="num" type="number" min="0" max="30" step="0.5" value="0"></div></div>
+          <div class="field"><label>GRAIN</label><div class="slider"><input id="grain" type="range" min="0" max="100" step="1" value="0"><input id="grainNum" class="num" type="number" min="0" max="100" step="1" value="0"></div></div>
+          <div class="field"><label>GLOW</label><div class="slider"><input id="glow" type="range" min="0" max="100" step="1" value="0"><input id="glowNum" class="num" type="number" min="0" max="100" step="1" value="0"></div></div>
+        </div>
       </section>
       <section class="control-section">
         <h2 class="section-title">TONALITÀ</h2>
-        <div class="field"><label>BLACK POINT</label><div class="slider"><input id="blackPoint" type="range" min="0" max="255" step="1" value="0"><input id="blackPointNum" class="num" type="number" min="0" max="255" step="1" value="0"></div></div>
-        <div class="field"><label>WHITE POINT</label><div class="slider"><input id="whitePoint" type="range" min="1" max="255" step="1" value="255"><input id="whitePointNum" class="num" type="number" min="1" max="255" step="1" value="255"></div></div>
-        <div class="field"><label>GAMMA</label><div class="slider"><input id="gammaVal" type="range" min="0.1" max="3" step="0.05" value="1"><input id="gammaValNum" class="num" type="number" min="0.1" max="3" step="0.05" value="1"></div></div>
-        <div class="field"><label>BRIGHTNESS</label><div class="slider"><input id="brightness" type="range" min="-100" max="100" step="1" value="0"><input id="brightnessNum" class="num" type="number" min="-100" max="100" step="1" value="0"></div></div>
-        <div class="field"><label>CONTRAST</label><div class="slider"><input id="contrast" type="range" min="-100" max="100" step="1" value="0"><input id="contrastNum" class="num" type="number" min="-100" max="100" step="1" value="0"></div></div>
+        <div class="control-section__fields">
+          <div class="field"><label>BLACK POINT</label><div class="slider"><input id="blackPoint" type="range" min="0" max="255" step="1" value="0"><input id="blackPointNum" class="num" type="number" min="0" max="255" step="1" value="0"></div></div>
+          <div class="field"><label>WHITE POINT</label><div class="slider"><input id="whitePoint" type="range" min="1" max="255" step="1" value="255"><input id="whitePointNum" class="num" type="number" min="1" max="255" step="1" value="255"></div></div>
+          <div class="field"><label>GAMMA</label><div class="slider"><input id="gammaVal" type="range" min="0.1" max="3" step="0.05" value="1"><input id="gammaValNum" class="num" type="number" min="0.1" max="3" step="0.05" value="1"></div></div>
+          <div class="field"><label>BRIGHTNESS</label><div class="slider"><input id="brightness" type="range" min="-100" max="100" step="1" value="0"><input id="brightnessNum" class="num" type="number" min="-100" max="100" step="1" value="0"></div></div>
+          <div class="field"><label>CONTRAST</label><div class="slider"><input id="contrast" type="range" min="-100" max="100" step="1" value="0"><input id="contrastNum" class="num" type="number" min="-100" max="100" step="1" value="0"></div></div>
+        </div>
       </section>
       <section class="control-section">
         <h2 class="section-title">STILE</h2>
-        <div class="field"><label>STYLE</label><select id="style"><option value="solid">SOLID</option><option value="outline">OUTLINE</option><option value="ring">RING</option></select></div>
-        <div class="field"><label>OUTLINE THICKNESS</label><div class="slider"><input id="thickness" type="range" min="1" max="6" step="1" value="2"><input id="thicknessNum" class="num" type="number" min="1" max="6" step="1" value="2"></div></div>
-            <div class="field"><label>DITHERING</label><select id="dither"><option value="none">NONE</option><option value="fs">FLOYD–STEINBERG</option><option value="atkinson">ATKINSON</option><option value="jjn">JJN</option><option value="stucki">STUCKI</option><option value="burkes">BURKES</option><option value="sierra2">SIERRA 2</option><option value="bayer4">BAYER 4</option><option value="bayer8">BAYER 8</option><option value="cross">CROSS-HATCH</option><option value="halftone">HALFTONE</option><option value="halftone_motion">HALFTONE MOTION</option><option value="thermal">THERMAL PIXEL</option><option value="ascii_simple">ASCII SIMPLE</option><option value="ascii_unicode">ASCII UNICODE</option><option value="ascii_custom">ASCII CUSTOM</option></select></div>
-        <div id="asciiCustomField" class="field field--ascii-custom" hidden>
-          <label>ASCII CHARACTERS</label>
-          <input id="asciiChars" type="text" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" maxlength="64" value=" .:-=+*#%@">
-          <small class="muted">Ordina i caratteri dal più chiaro al più scuro.</small>
+        <div class="control-section__fields">
+          <div class="field"><label>STYLE</label><select id="style"><option value="solid">SOLID</option><option value="outline">OUTLINE</option><option value="ring">RING</option></select></div>
+          <div class="field"><label>OUTLINE THICKNESS</label><div class="slider"><input id="thickness" type="range" min="1" max="6" step="1" value="2"><input id="thicknessNum" class="num" type="number" min="1" max="6" step="1" value="2"></div></div>
+          <div class="field"><label>DITHERING</label><select id="dither"><option value="none">NONE</option><option value="fs">FLOYD–STEINBERG</option><option value="atkinson">ATKINSON</option><option value="jjn">JJN</option><option value="stucki">STUCKI</option><option value="burkes">BURKES</option><option value="sierra2">SIERRA 2</option><option value="bayer4">BAYER 4</option><option value="bayer8">BAYER 8</option><option value="cross">CROSS-HATCH</option><option value="halftone">HALFTONE</option><option value="halftone_motion">HALFTONE MOTION</option><option value="thermal">THERMAL PIXEL</option><option value="ascii_simple">ASCII SIMPLE</option><option value="ascii_unicode">ASCII UNICODE</option><option value="ascii_custom">ASCII CUSTOM</option></select></div>
+          <div id="asciiCustomField" class="field field--ascii-custom" hidden>
+            <label>ASCII CHARACTERS</label>
+            <input id="asciiChars" type="text" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" maxlength="64" value=" .:-=+*#%@">
+            <small class="muted">Ordina i caratteri dal più chiaro al più scuro.</small>
+          </div>
+          <div class="field"><label>INVERT</label><select id="invert"><option value="auto">AUTO</option><option value="no">NO</option><option value="yes">YES</option></select></div>
+          <div class="field"><label>BG</label><input id="bg" type="color" value="#ffffff"></div>
+          <div class="field"><label>FG</label><input id="fg" type="color" value="#000000"></div>
         </div>
-        <div class="field"><label>INVERT</label><select id="invert"><option value="auto">AUTO</option><option value="no">NO</option><option value="yes">YES</option></select></div>
-        <div class="field"><label>BG</label><input id="bg" type="color" value="#ffffff"></div>
-        <div class="field"><label>FG</label><input id="fg" type="color" value="#000000"></div>
       </section>
       <section class="control-section">
         <h2 class="section-title">ANTEPRIMA</h2>
-        <div class="field"><label>PREVIEW SCALE</label><div class="slider"><input id="scale" type="range" min="0.25" max="3" step="0.25" value="1"><input id="scaleNum" class="num" type="number" min="0.25" max="3" step="0.25" value="1"></div></div>
+        <div class="control-section__fields">
+          <div class="field"><label>PREVIEW SCALE</label><div class="slider"><input id="scale" type="range" min="0.25" max="3" step="0.25" value="1"><input id="scaleNum" class="num" type="number" min="0.25" max="3" step="0.25" value="1"></div></div>
+        </div>
       </section>
     </div>
   </aside>
