@@ -5,7 +5,7 @@
 - ✅ **Android Chrome 125 (Pixel 7)** – horizontal controls remain accessible, blur and tonal sliders react immediately with the debounced renderer, SVG/PNG/JPEG exports respect DPI settings and finish without UI hangs, large inputs stay under the 3000 px export ceiling.
 
 ## Performance tips & limitations
-- Uploads are automatically rescaled so the longest edge is ≤ 800 px for previews; exports can still reach up to 3000 px per side.
+- Uploads are automatically rescaled so the longest edge is ≤ 1200 px for previews; exports can still reach up to 3000 px per side.
 - The worker processes frames at a fixed 1024–1536 px work resolution; only pixel size or output scale changes trigger a fresh resample.
 - Heavy dithering modes combined with maximum grain are more expensive—start with lighter settings on lower-powered devices.
 - PNG/JPEG exports add DPI metadata (72/150/300 DPI) but remain capped at 3000 px to avoid memory spikes; SVG exports are unlimited.

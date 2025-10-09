@@ -15,7 +15,7 @@ const CONTROL_IDS = [
   'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
   'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
   'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
-  'dither','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
+  'dither','asciiChars','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
   'jpegQ','jpegQNum','rasterBG'
 ];
 
@@ -24,7 +24,7 @@ for(const id of CONTROL_IDS){
   controls[id] = $(id);
 }
 
-const MAX_UPLOAD_DIMENSION = 800;
+const MAX_UPLOAD_DIMENSION = 1200;
 const PREVIEW_MAX_DIMENSION = 360;
 const VIDEO_PREVIEW_FPS = 8;
 const VIDEO_EXPORT_FPS = 12;
@@ -32,6 +32,10 @@ const MAX_VIDEO_FRAMES = 240;
 const RENDER_DEBOUNCE_MS = 90;
 
 const OFFSCREEN_SUPPORTED = typeof OffscreenCanvas !== 'undefined';
+
+const DEFAULT_ASCII_CUSTOM = ' .:-=+*#%@';
+const ASCII_MIN_TILE = 8;
+const ASCII_CUSTOM_MAX = 64;
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
@@ -71,7 +75,8 @@ const state = {
   offscreenSupported: OFFSCREEN_SUPPORTED,
   sourceOffscreen: null,
   videoSource: null,
-  previewPlayer: null
+  previewPlayer: null,
+  customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM)
 };
 
 let renderQueued = false;
@@ -88,6 +93,10 @@ function init(){
   bindDropzone();
   bindExportModal();
   bindPlaybackControl();
+  if(controls.asciiChars){
+    controls.asciiChars.value = state.customASCIIString;
+  }
+  updateAsciiCustomVisibility();
   window.addEventListener('resize', () => {
     if(!state.lastSVG) return;
     schedulePreviewRefresh();
@@ -187,11 +196,20 @@ function bindControls(){
       fastRender();
     });
   }
+  if(controls.asciiChars){
+    controls.asciiChars.addEventListener('input', handleCustomASCIIInput);
+    controls.asciiChars.addEventListener('blur', syncCustomASCIIInput);
+  }
   const changeIds = ['dither','invert','bg','fg','style','fmt','dpi','lockAR'];
   for(const id of changeIds){
     const el = controls[id];
     if(!el) continue;
-    el.addEventListener('change', () => fastRender());
+    el.addEventListener('change', () => {
+      if(id === 'dither'){
+        updateAsciiCustomVisibility();
+      }
+      fastRender();
+    });
   }
 
   if(controls.outW){
@@ -207,6 +225,33 @@ function bindControls(){
       applyExportScalePreset(true);
       updateExportButtons();
     });
+  }
+}
+
+function updateAsciiCustomVisibility(){
+  const field = $('asciiCustomField');
+  if(!field) return;
+  const mode = controls.dither ? controls.dither.value : 'none';
+  field.hidden = mode !== 'ascii_custom';
+}
+
+function handleCustomASCIIInput(){
+  if(!controls.asciiChars) return;
+  const raw = controls.asciiChars.value || '';
+  const normalized = normalizeCustomASCIIString(raw);
+  const prev = state.customASCIIString;
+  state.customASCIIString = normalized;
+  if(normalized !== prev){
+    fastRender();
+  }
+}
+
+function syncCustomASCIIInput(){
+  if(!controls.asciiChars) return;
+  const normalized = normalizeCustomASCIIString(controls.asciiChars.value || '');
+  state.customASCIIString = normalized;
+  if(controls.asciiChars.value !== normalized){
+    controls.asciiChars.value = normalized;
   }
 }
 
@@ -1064,6 +1109,21 @@ function clampInt(value, min, max){
   return Math.max(min, Math.min(max, parsed));
 }
 
+function normalizeCustomASCIIString(input){
+  let chars = Array.from(typeof input === 'string' ? input : '');
+  chars = chars.filter((ch) => ch !== '\r' && ch !== '\n');
+  if(chars.length === 0){
+    chars = Array.from(DEFAULT_ASCII_CUSTOM);
+  }
+  if(!chars.includes(' ')){
+    chars.unshift(' ');
+  }
+  if(chars.length > ASCII_CUSTOM_MAX){
+    chars.length = ASCII_CUSTOM_MAX;
+  }
+  return chars.join('');
+}
+
 function collectRenderOptions(){
   const px = clampInt(controls.pixelSize.value||10, 2, 200);
   const thr = clampInt(controls.threshold.value||180, 0, 255);
@@ -1083,7 +1143,8 @@ function collectRenderOptions(){
   const fg = controls.fg.value||'#000000';
   const scaleVal = parseFloat(controls.scale.value||'1');
   const scale = Number.isFinite(scaleVal) && scaleVal>0 ? scaleVal : 1;
-  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale};
+  const asciiCustom = state.customASCIIString;
+  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom};
 }
 
 function buildWorkerOptions(options){
@@ -1100,7 +1161,8 @@ function buildWorkerOptions(options){
     style: options.style,
     thickness: options.thick,
     dither: options.mode,
-    invertMode: options.invertMode
+    invertMode: options.invertMode,
+    asciiCustom: options.asciiCustom
   };
 }
 
@@ -1135,7 +1197,12 @@ async function generate(){
   const frameData = createFrameData(result, options);
   if(frameData && frameData.kind === 'ascii'){
     result.lines = frameData.lines;
-    result.charset = frameData.charsetKey;
+    result.charsetKey = frameData.charsetKey;
+    result.charsetString = frameData.charsetString;
+    result.tile = frameData.tile;
+    result.outputWidth = frameData.outputWidth;
+    result.outputHeight = frameData.outputHeight;
+    result.ascii = frameData.ascii;
   }
   state.lastResult = {type: 'image', options, frame: result, frameData};
   state.lastResultId = jobId;
@@ -1223,12 +1290,28 @@ function requestWorkerProcess(message){
   });
 }
 
-function getASCIICharset(key){
+function getASCIICharset(key, customString){
+  if(key === 'ascii_custom'){
+    const normalized = normalizeCustomASCIIString(typeof customString === 'string' ? customString : state.customASCIIString);
+    return Array.from(normalized);
+  }
   return ASCII_CHARSETS[key] || ASCII_CHARSETS.ascii_simple;
 }
 
+function ensureASCIIArray(buffer){
+  if(!buffer) return null;
+  if(buffer instanceof Uint8Array) return buffer;
+  if(ArrayBuffer.isView(buffer)){
+    return new Uint8Array(buffer.buffer, buffer.byteOffset || 0, buffer.byteLength);
+  }
+  if(buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
+  if(Array.isArray(buffer)) return Uint8Array.from(buffer);
+  return null;
+}
+
 function asciiBufferToLines(buffer, width, height, charset){
-  if(!buffer || !charset){
+  const data = ensureASCIIArray(buffer);
+  if(!data || !charset){
     return [];
   }
   const lines = new Array(height);
@@ -1237,7 +1320,7 @@ function asciiBufferToLines(buffer, width, height, charset){
     const row = new Array(width);
     const rowOffset = y*width;
     for(let x=0;x<width;x++){
-      const idx = buffer[rowOffset + x];
+      const idx = data[rowOffset + x];
       row[x] = charset[idx] || fallback;
     }
     lines[y] = row.join('');
@@ -1254,19 +1337,32 @@ function createFrameData(result, options){
   const outputHeight = Math.round(result.outputHeight || (result.gridHeight * tile));
   const kind = result.kind || (result.ascii ? 'ascii' : 'mask');
   if(kind === 'ascii'){
-    const charsetKey = result.charset || options.mode || 'ascii_simple';
-    const charset = getASCIICharset(charsetKey);
-    const lines = result.lines || asciiBufferToLines(result.ascii, result.gridWidth, result.gridHeight, charset);
+    const charsetKey = result.charsetKey || result.charset || options.mode || 'ascii_simple';
+    const asciiArray = ensureASCIIArray(result.ascii);
+    const charsetString = typeof result.charsetString === 'string'
+      ? result.charsetString
+      : (charsetKey === 'ascii_custom' ? options.asciiCustom : '');
+    const effectiveCharset = getASCIICharset(charsetKey, charsetString);
+    const lines = result.lines && result.lines.length
+      ? result.lines
+      : asciiBufferToLines(asciiArray, result.gridWidth, result.gridHeight, effectiveCharset);
+    const effectiveTile = Math.max(tile, ASCII_MIN_TILE);
+    const finalWidth = Math.round(result.outputWidth || (result.gridWidth * effectiveTile));
+    const finalHeight = Math.round(result.outputHeight || (result.gridHeight * effectiveTile));
+    const normalizedCharsetString = charsetKey === 'ascii_custom'
+      ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
+      : effectiveCharset.join('');
     return {
       kind: 'ascii',
       gridWidth: result.gridWidth,
       gridHeight: result.gridHeight,
-      tile,
-      ascii: result.ascii,
+      tile: effectiveTile,
+      ascii: asciiArray,
       lines,
       charsetKey,
-      outputWidth,
-      outputHeight,
+      charsetString: normalizedCharsetString,
+      outputWidth: finalWidth,
+      outputHeight: finalHeight,
       mode: result.mode || options.mode || 'ascii_simple'
     };
   }
@@ -1297,6 +1393,7 @@ function buildPreviewData(frame, options){
       tile: frame.tile,
       lines: frame.lines,
       charsetKey: frame.charsetKey,
+      charsetString: frame.charsetString,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -1372,7 +1469,9 @@ function buildAsciiSVGString(frame, tile, options){
   const unit = tile || 1;
   const svgW = Math.max(1, Math.round(frame.gridWidth * unit));
   const svgH = Math.max(1, Math.round(frame.gridHeight * unit));
-  const lines = frame.lines && frame.lines.length ? frame.lines : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey));
+  const lines = frame.lines && frame.lines.length
+    ? frame.lines
+    : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
   const textMarkup = asciiLinesToSVGTexts(lines, unit);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
   if(options.bg && options.bg !== 'transparent'){
@@ -2025,7 +2124,11 @@ async function getVideoExportData(options){
     if(!result || result.jobId !== jobId){
       throw new Error('Elaborazione video interrotta');
     }
-    frames.push(result);
+    const frameData = createFrameData(result, options);
+    if(!frameData){
+      throw new Error('Frame video non valido');
+    }
+    frames.push(frameData);
   }
   const firstTile = frames[0].tile != null ? frames[0].tile : Math.max(1, options.px);
   const baseWidth = Math.round(frames[0].gridWidth * firstTile);
@@ -2098,7 +2201,14 @@ function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
   const canvas = createExportCanvas(width, height, {forceDOM: true});
   const ctx = canvas.getContext('2d', {alpha: true});
   if(!ctx) return new Uint8Array(width*height);
-  const lines = frame.lines && frame.lines.length ? frame.lines : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey || (options && options.mode)));
+  const lines = frame.lines && frame.lines.length
+    ? frame.lines
+    : asciiBufferToLines(
+      frame.ascii,
+      frame.gridWidth,
+      frame.gridHeight,
+      getASCIICharset(frame.charsetKey || (options && options.mode), frame.charsetString || (options && options.asciiCustom))
+    );
   paintAscii(ctx, {
     type: 'ascii',
     lines,
@@ -2599,8 +2709,8 @@ let placeholderCanvas = null;
 function getPlaceholderCanvas(){
   if(!placeholderCanvas){
     placeholderCanvas = document.createElement('canvas');
-    placeholderCanvas.width = 800;
-    placeholderCanvas.height = 400;
+    placeholderCanvas.width = 1200;
+    placeholderCanvas.height = 600;
     const ctx = placeholderCanvas.getContext('2d');
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0,0,placeholderCanvas.width,placeholderCanvas.height);

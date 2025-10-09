@@ -14,6 +14,10 @@ let baseGrid = null;
 let lastGridWidth = 0;
 let lastGridHeight = 0;
 
+const ASCII_DEFAULT_CUSTOM = ' .:-=+*#%@';
+const ASCII_MIN_TILE = 8;
+const ASCII_CUSTOM_MAX = 64;
+
 const BAYER4_MATRIX = [
   [0,8,2,10],
   [12,4,14,6],
@@ -34,6 +38,34 @@ const ASCII_SETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
 };
+
+function normalizeCustomCharset(input){
+  let chars = Array.from(typeof input === 'string' ? input : '');
+  chars = chars.filter((ch) => ch !== '\r' && ch !== '\n');
+  if(chars.length === 0){
+    chars = Array.from(ASCII_DEFAULT_CUSTOM);
+  }
+  if(!chars.includes(' ')){
+    chars.unshift(' ');
+  }
+  if(chars.length > ASCII_CUSTOM_MAX){
+    chars.length = ASCII_CUSTOM_MAX;
+  }
+  return chars.join('');
+}
+
+function resolveCharset(key, customString){
+  if(key === 'ascii_custom'){
+    const normalized = normalizeCustomCharset(customString);
+    return {chars: Array.from(normalized), key: 'ascii_custom', charsetString: normalized};
+  }
+  const base = ASCII_SETS[key];
+  if(base){
+    return {chars: base, key, charsetString: base.join('')};
+  }
+  const fallback = ASCII_SETS.ascii_simple;
+  return {chars: fallback, key: 'ascii_simple', charsetString: fallback.join('')};
+}
 
 ctx.postMessage({type:'ready'});
 
@@ -85,6 +117,7 @@ function handleProcess({jobId, options}){
     const result = processImage(options||{});
     const transfers = [];
     if(result.mask) transfers.push(result.mask.buffer);
+    if(result.ascii) transfers.push(result.ascii.buffer);
     ctx.postMessage({...result, type:'result', jobId}, transfers);
   }catch(error){
     ctx.postMessage({type:'error', jobId, message: error && error.message ? error.message : String(error)});
@@ -147,18 +180,20 @@ function processImage(options){
   let gridHeight = baseHeight;
   let tile = pixelSize;
 
-  if(dither === 'ascii_simple' || dither === 'ascii_unicode'){
-    const ascii = asciiDither(tonal, baseWidth, baseHeight, invert, dither);
+  if(dither === 'ascii_simple' || dither === 'ascii_unicode' || dither === 'ascii_custom'){
+    const ascii = asciiDither(tonal, baseWidth, baseHeight, invert, dither, options.asciiCustom);
+    const asciiTile = Math.max(pixelSize, ASCII_MIN_TILE);
     return {
       kind: 'ascii',
       gridWidth: baseWidth,
       gridHeight: baseHeight,
       mode: dither,
-      outputWidth: Math.round(baseWidth*pixelSize),
-      outputHeight: Math.round(baseHeight*pixelSize),
-      tile: pixelSize,
-      ascii: ascii.buffer,
-      charset: ascii.key
+      outputWidth: Math.round(baseWidth*asciiTile),
+      outputHeight: Math.round(baseHeight*asciiTile),
+      tile: asciiTile,
+      ascii: ascii.data,
+      charsetKey: ascii.key,
+      charsetString: ascii.charsetString
     };
   }
 
@@ -200,18 +235,19 @@ function processImage(options){
   };
 }
 
-function asciiDither(gray, width, height, invert, key){
-  const charset = ASCII_SETS[key] || ASCII_SETS.ascii_simple;
+function asciiDither(gray, width, height, invert, key, customString){
+  const charsetInfo = resolveCharset(key, customString);
+  const charset = charsetInfo.chars;
   const maxIndex = charset.length > 0 ? charset.length - 1 : 0;
   const buffer = new Uint8Array(width*height);
   for(let i=0;i<buffer.length;i++){
     const value = invert ? (255 - gray[i]) : gray[i];
-    let idx = Math.round((value/255) * maxIndex);
+    let idx = maxIndex > 0 ? Math.round((value/255) * maxIndex) : 0;
     if(idx < 0) idx = 0;
     else if(idx > maxIndex) idx = maxIndex;
     buffer[i] = idx;
   }
-  return {buffer, key};
+  return {data: buffer, key: charsetInfo.key, charsetString: charsetInfo.charsetString};
 }
 
 
