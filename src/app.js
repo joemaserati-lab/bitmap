@@ -1554,19 +1554,23 @@ function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
   if(!lines || !lines.length){
     return '';
   }
-  const x = Math.max(0, cellWidth * 0.1);
-  const baseline = cellHeight * 0.5;
-  const lineStep = cellHeight;
+  const offsetX = cellWidth / 2;
+  const offsetY = cellHeight / 2;
+  const stepX = cellWidth;
+  const stepY = cellHeight;
   let markup = '';
-  for(let i=0;i<lines.length;i++){
-    const raw = lines[i];
-    if(!raw) continue;
-    const trimmed = raw.replace(/\s+$/, '');
-    if(!trimmed){
-      continue;
+  for(let y=0;y<lines.length;y++){
+    const line = lines[y];
+    if(!line) continue;
+    const baseY = offsetY + y*stepY;
+    for(let x=0;x<line.length;x++){
+      const ch = line.charAt(x);
+      if(!ch || ch === ' '){
+        continue;
+      }
+      const baseX = offsetX + x*stepX;
+      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle">${escapeXML(ch)}</text>`;
     }
-    const y = baseline + i*lineStep;
-    markup += `<text x="${formatNumber(x)}" y="${formatNumber(y)}" xml:space="preserve" dominant-baseline="middle">${escapeXML(trimmed)}</text>`;
   }
   return markup;
 }
