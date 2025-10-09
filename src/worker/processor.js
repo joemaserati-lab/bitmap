@@ -14,6 +14,26 @@ let baseGrid = null;
 let lastGridWidth = 0;
 let lastGridHeight = 0;
 
+const THERMAL_PALETTE_KEY = 'thermal_v1';
+const THERMAL_PALETTE = new Uint8Array([
+  0, 0, 0,
+  20, 0, 80,
+  0, 0, 155,
+  0, 60, 200,
+  0, 110, 255,
+  0, 170, 255,
+  0, 220, 255,
+  0, 255, 200,
+  50, 255, 120,
+  160, 255, 70,
+  220, 220, 0,
+  255, 170, 0,
+  255, 90, 0,
+  255, 0, 0,
+  200, 0, 0,
+  255, 255, 255
+]);
+
 const ASCII_DEFAULT_CUSTOM = ' .:-=+*#%@';
 const ASCII_MIN_TILE = 8;
 const ASCII_CUSTOM_MAX = 64;
@@ -117,6 +137,8 @@ function handleProcess({jobId, options}){
     const result = processImage(options||{});
     const transfers = [];
     if(result.mask) transfers.push(result.mask.buffer);
+    if(result.indexes) transfers.push(result.indexes.buffer);
+    if(result.palette) transfers.push(result.palette.buffer);
     if(result.ascii) transfers.push(result.ascii.buffer);
     ctx.postMessage({...result, type:'result', jobId}, transfers);
   }catch(error){
@@ -201,6 +223,23 @@ function processImage(options){
       ascii: ascii.data,
       charsetKey: ascii.key,
       charsetString: ascii.charsetString,
+      aspectWidth: sourceWidth,
+      aspectHeight: sourceHeight
+    };
+  }
+
+  if(dither === 'thermal'){
+    const thermal = thermalPixelize(tonal, baseWidth, baseHeight, invert);
+    return {
+      kind: 'thermal',
+      gridWidth: baseWidth,
+      gridHeight: baseHeight,
+      mode: dither,
+      outputWidth: Math.round(baseWidth*pixelSize),
+      outputHeight: Math.round(baseHeight*pixelSize),
+      tile: pixelSize,
+      indexes: thermal.indexes,
+      paletteKey: thermal.paletteKey,
       aspectWidth: sourceWidth,
       aspectHeight: sourceHeight
     };
@@ -474,6 +513,35 @@ function halftoneDither(gray, width, height, threshold, invert, mode, pixelSize)
     }
   }
   return {mask, width: outWidth, height: outHeight, scale};
+}
+
+function thermalPixelize(gray, width, height, invert){
+  const total = width * height;
+  const indexes = new Uint8Array(total);
+  const paletteSize = THERMAL_PALETTE.length / 3;
+  if(paletteSize <= 0){
+    return {indexes, paletteKey: THERMAL_PALETTE_KEY};
+  }
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      const idx = y*width + x;
+      let value = gray[idx];
+      let weight = 1;
+      if(x>0){ value += gray[idx-1] * 0.4; weight += 0.4; }
+      if(x<width-1){ value += gray[idx+1] * 0.4; weight += 0.4; }
+      if(y>0){ value += gray[idx-width] * 0.25; weight += 0.25; }
+      if(y<height-1){ value += gray[idx+width] * 0.25; weight += 0.25; }
+      value /= weight;
+      if(invert){
+        value = 255 - value;
+      }
+      let normalized = clamp01(value / 255);
+      normalized = Math.pow(normalized, 0.85);
+      const paletteIndex = Math.max(0, Math.min(paletteSize - 1, Math.round(normalized * (paletteSize - 1))));
+      indexes[idx] = paletteIndex;
+    }
+  }
+  return {indexes, paletteKey: THERMAL_PALETTE_KEY};
 }
 
 function crosshatchDither(gray, width, height, threshold, invert){

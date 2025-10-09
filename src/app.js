@@ -42,6 +42,30 @@ const ASCII_CHARSETS = {
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
 };
 
+const THERMAL_PALETTE_KEY = 'thermal_v1';
+const THERMAL_PALETTE = new Uint8Array([
+  0, 0, 0,
+  20, 0, 80,
+  0, 0, 155,
+  0, 60, 200,
+  0, 110, 255,
+  0, 170, 255,
+  0, 220, 255,
+  0, 255, 200,
+  50, 255, 120,
+  160, 255, 70,
+  220, 220, 0,
+  255, 170, 0,
+  255, 90, 0,
+  255, 0, 0,
+  200, 0, 0,
+  255, 255, 255
+]);
+
+const PALETTE_LIBRARY = {
+  [THERMAL_PALETTE_KEY]: THERMAL_PALETTE
+};
+
 const ASCII_FONT_STACK = 'IBM Plex Mono, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace';
 
 const state = {
@@ -1298,7 +1322,7 @@ function getASCIICharset(key, customString){
   return ASCII_CHARSETS[key] || ASCII_CHARSETS.ascii_simple;
 }
 
-function ensureASCIIArray(buffer){
+function ensureUint8Array(buffer){
   if(!buffer) return null;
   if(buffer instanceof Uint8Array) return buffer;
   if(ArrayBuffer.isView(buffer)){
@@ -1307,6 +1331,10 @@ function ensureASCIIArray(buffer){
   if(buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
   if(Array.isArray(buffer)) return Uint8Array.from(buffer);
   return null;
+}
+
+function ensureASCIIArray(buffer){
+  return ensureUint8Array(buffer);
 }
 
 function asciiBufferToLines(buffer, width, height, charset){
@@ -1371,6 +1399,18 @@ function adjustDimensionsForAspect(width, height, aspectWidth, aspectHeight){
   return {width: w, height: h, ratio: h>0 ? w/h : 1};
 }
 
+function resolvePaletteFromResult(result){
+  if(!result) return null;
+  if(result.palette){
+    const paletteArray = ensureUint8Array(result.palette);
+    if(paletteArray && paletteArray.length) return paletteArray;
+  }
+  if(result.paletteKey && PALETTE_LIBRARY[result.paletteKey]){
+    return PALETTE_LIBRARY[result.paletteKey];
+  }
+  return null;
+}
+
 function createFrameData(result, options){
   if(!result){
     return null;
@@ -1415,6 +1455,25 @@ function createFrameData(result, options){
       mode: result.mode || options.mode || 'ascii_simple'
     };
   }
+  if(kind === 'thermal'){
+    const indexes = ensureUint8Array(result.indexes);
+    const palette = resolvePaletteFromResult(result);
+    return {
+      kind: 'thermal',
+      gridWidth: result.gridWidth,
+      gridHeight: result.gridHeight,
+      tile,
+      indexes,
+      palette,
+      paletteKey: result.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined),
+      outputWidth: adjusted.width,
+      outputHeight: adjusted.height,
+      aspectWidth,
+      aspectHeight,
+      aspectRatio: adjusted.ratio,
+      mode: result.mode || options.mode || 'thermal'
+    };
+  }
   return {
     kind: 'mask',
     gridWidth: result.gridWidth,
@@ -1446,6 +1505,24 @@ function buildPreviewData(frame, options){
       lines: frame.lines,
       charsetKey: frame.charsetKey,
       charsetString: frame.charsetString,
+      bg: options.bg,
+      fg: options.fg,
+      glow: options.glow
+    };
+  }
+  if(frame.kind === 'thermal'){
+    const palette = frame.palette || (frame.paletteKey ? PALETTE_LIBRARY[frame.paletteKey] : null);
+    return {
+      type: 'thermal',
+      mode: frame.mode,
+      width: frame.outputWidth,
+      height: frame.outputHeight,
+      gridWidth: frame.gridWidth,
+      gridHeight: frame.gridHeight,
+      tile: frame.tile,
+      indexes: frame.indexes,
+      palette,
+      paletteKey: frame.paletteKey,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -1517,6 +1594,58 @@ function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}){
   return svg;
 }
 
+function buildIndexedSVGString(indexes, width, height, tile, palette, bg){
+  if(!indexes || !palette) return '';
+  const unit = tile || 1;
+  const svgW = Math.max(1, Math.round(width * unit));
+  const svgH = Math.max(1, Math.round(height * unit));
+  const paletteSize = palette.length / 3;
+  const paths = new Array(paletteSize).fill('');
+  for(let y=0;y<height;y++){
+    const rowOffset = y*width;
+    let runColor = -1;
+    let runStart = 0;
+    for(let x=0;x<=width;x++){
+      const idx = x<width ? indexes[rowOffset + x] : -1;
+      if(idx === runColor){
+        continue;
+      }
+      if(runColor >= 0 && runColor < paletteSize){
+        const length = x - runStart;
+        if(length > 0){
+          const rectWidth = length * unit;
+          const rectX = runStart * unit;
+          const rectY = y * unit;
+          paths[runColor] += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(unit)}h-${formatNumber(rectWidth)}z`;
+        }
+      }
+      runColor = idx;
+      runStart = x;
+    }
+  }
+  const colorCache = new Array(paletteSize);
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(bg && bg !== 'transparent'){
+    svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
+  }
+  for(let i=0;i<paths.length;i++){
+    const path = paths[i];
+    if(!path) continue;
+    let color = colorCache[i];
+    if(!color){
+      const base = i*3;
+      const r = palette[base];
+      const g = palette[base+1];
+      const b = palette[base+2];
+      color = `rgb(${r},${g},${b})`;
+      colorCache[i] = color;
+    }
+    svg += `<path fill="${color}" d="${path}"/>`;
+  }
+  svg += '</svg>';
+  return svg;
+}
+
 function buildAsciiSVGString(frame, options){
   const width = Math.max(1, Math.round(frame.outputWidth || (frame.gridWidth * (frame.tile || 1))));
   const height = Math.max(1, Math.round(frame.outputHeight || (frame.gridHeight * (frame.tile || 1))));
@@ -1582,6 +1711,9 @@ function buildExportSVG(result, options){
   const tile = frame.tile != null ? frame.tile : Math.max(1, options.px);
   if(frame.kind === 'ascii'){
     return buildAsciiSVGString(frame, options);
+  }
+  if(frame.kind === 'thermal'){
+    return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg);
   }
   return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
 }
@@ -1720,7 +1852,7 @@ function renderPreview(previewData, scale){
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
   const dpr = Math.max(1, window.devicePixelRatio || 1);
-  if(previewData.type === 'mask' || previewData.type === 'ascii'){
+  if(previewData.type === 'mask' || previewData.type === 'ascii' || previewData.type === 'thermal'){
     const canvas = document.createElement('canvas');
     const cssWidth = Math.max(1, dims.width);
     const cssHeight = Math.max(1, dims.height);
@@ -1755,6 +1887,8 @@ function paintFrame(ctx, data, outWidth, outHeight){
   const type = data.type || data.kind || (data.mask ? 'mask' : 'ascii');
   if(type === 'ascii'){
     paintAscii(ctx, data, outWidth, outHeight);
+  }else if(type === 'thermal'){
+    paintThermal(ctx, data, outWidth, outHeight);
   }else{
     paintMask(ctx, data, outWidth, outHeight);
   }
@@ -1814,6 +1948,57 @@ function paintMask(ctx, data, outWidth, outHeight){
     const drawY = y * cellHeight;
     ctx.fillRect(drawX, drawY, length * cellWidth, cellHeight);
   });
+  ctx.restore();
+}
+
+function paintThermal(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const indexes = data.indexes;
+  const palette = data.palette;
+  if(!indexes || !palette) {
+    ctx.restore();
+    return;
+  }
+  const gridWidth = Math.max(1, data.gridWidth || 0);
+  const gridHeight = Math.max(1, data.gridHeight || 0);
+  const tile = data.tile != null ? data.tile : 1;
+  const baseWidth = gridWidth * tile;
+  const baseHeight = gridHeight * tile;
+  const scaleX = baseWidth ? outWidth / baseWidth : 1;
+  const scaleY = baseHeight ? outHeight / baseHeight : 1;
+  const cellWidth = tile * scaleX;
+  const cellHeight = tile * scaleY;
+  const paletteSize = palette.length / 3;
+  const colorCache = new Array(paletteSize);
+  for(let y=0;y<gridHeight;y++){
+    const rowOffset = y*gridWidth;
+    const drawY = y * cellHeight;
+    for(let x=0;x<gridWidth;x++){
+      const idx = indexes[rowOffset + x] || 0;
+      const base = idx * 3;
+      if(base + 2 >= palette.length) continue;
+      let color = colorCache[idx];
+      if(!color){
+        const r = palette[base];
+        const g = palette[base+1];
+        const b = palette[base+2];
+        color = `rgb(${r},${g},${b})`;
+        colorCache[idx] = color;
+      }
+      ctx.fillStyle = color;
+      const drawX = x * cellWidth;
+      ctx.fillRect(drawX, drawY, cellWidth, cellHeight);
+    }
+  }
   ctx.restore();
 }
 
@@ -2110,20 +2295,25 @@ async function downloadGIF(){
   const options = collectRenderOptions();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
-  const frames = exportData.frames.map((frame) => {
-    if(frame.kind === 'ascii'){
-      return asciiFrameToBinaryFrame(frame, dims.width, dims.height, options);
+  const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
+  if(!indexedFrames.length){
+    throw new Error('Nessun frame disponibile per la GIF');
+  }
+  const referencePalette = indexedFrames[0].palette;
+  const transparentIndex = indexedFrames[0].transparentIndex;
+  for(let i=1;i<indexedFrames.length;i++){
+    if(!palettesMatch(referencePalette, indexedFrames[i].palette)){
+      throw new Error('Palette incoerenti tra i frame GIF');
     }
-    return maskToBinaryFrame(
-      frame.mask,
-      frame.gridWidth,
-      frame.gridHeight,
-      dims.width,
-      dims.height,
-      frame.tile != null ? frame.tile : options.px
-    );
-  });
-  const gifBytes = encodeBinaryGif(frames, dims.width, dims.height, exportData.durations, options.bg, options.fg);
+  }
+  const gifBytes = encodeIndexedGif(
+    indexedFrames.map((f) => f.indexes),
+    dims.width,
+    dims.height,
+    exportData.durations,
+    referencePalette,
+    transparentIndex
+  );
   const blob = new Blob([gifBytes], {type:'image/gif'});
   triggerDownload(blob, 'bitmap.gif');
 }
@@ -2307,6 +2497,95 @@ function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
   return binary;
 }
 
+function frameToIndexedFrame(frame, outWidth, outHeight, options){
+  if(!frame){
+    return {
+      indexes: new Uint8Array(Math.max(1, Math.round(outWidth || 1)) * Math.max(1, Math.round(outHeight || 1))),
+      palette: new Uint8Array([0,0,0,255,255,255]),
+      transparentIndex: 0
+    };
+  }
+  const tile = frame.tile != null ? frame.tile : options.px;
+  if(frame.kind === 'thermal'){
+    const palette = ensureUint8Array(frame.palette) || new Uint8Array(0);
+    const indexes = resamplePaletteFrame(
+      ensureUint8Array(frame.indexes),
+      frame.gridWidth,
+      frame.gridHeight,
+      outWidth,
+      outHeight,
+      tile
+    );
+    return {indexes, palette, transparentIndex: -1};
+  }
+  if(frame.kind === 'ascii'){
+    const indexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
+    const paletteInfo = buildBinaryPalette(options.bg, options.fg);
+    return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+  }
+  const indexes = maskToBinaryFrame(
+    frame.mask,
+    frame.gridWidth,
+    frame.gridHeight,
+    outWidth,
+    outHeight,
+    tile
+  );
+  const paletteInfo = buildBinaryPalette(options.bg, options.fg);
+  return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+}
+
+function buildBinaryPalette(bgColor, fgColor){
+  const palette = new Uint8Array(6);
+  let transparentIndex = -1;
+  const bg = (!bgColor || bgColor === 'transparent') ? [0,0,0] : hexToRGB(bgColor);
+  if(!bgColor || bgColor === 'transparent'){
+    transparentIndex = 0;
+  }
+  const fg = hexToRGB(fgColor || '#000000');
+  palette.set(bg, 0);
+  palette.set(fg, 3);
+  return {palette, transparentIndex};
+}
+
+function palettesMatch(a, b){
+  if(a === b) return true;
+  if(!a || !b) return false;
+  if(a.length !== b.length) return false;
+  for(let i=0;i<a.length;i++){
+    if(a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function resamplePaletteFrame(indexes, gridWidth, gridHeight, outWidth, outHeight, tile){
+  if(!gridWidth || !gridHeight){
+    const width = Math.max(1, Math.round(outWidth || 1));
+    const height = Math.max(1, Math.round(outHeight || 1));
+    return new Uint8Array(width * height);
+  }
+  const unit = Math.max(1e-3, Math.abs(tile || 1));
+  const baseWidth = Math.max(1, Math.round(gridWidth * unit));
+  const baseHeight = Math.max(1, Math.round(gridHeight * unit));
+  const targetWidth = Math.max(1, Math.round(outWidth || baseWidth));
+  const targetHeight = Math.max(1, Math.round(outHeight || baseHeight));
+  const cellWidthPx = baseWidth / gridWidth;
+  const cellHeightPx = baseHeight / gridHeight;
+  const source = ensureUint8Array(indexes) || new Uint8Array(gridWidth * gridHeight);
+  const output = new Uint8Array(targetWidth * targetHeight);
+  for(let y=0;y<targetHeight;y++){
+    const srcYPx = Math.min(baseHeight - 1, Math.floor(y * baseHeight / targetHeight));
+    const cellY = Math.min(gridHeight - 1, Math.floor(srcYPx / cellHeightPx));
+    const rowOffset = cellY * gridWidth;
+    for(let x=0;x<targetWidth;x++){
+      const srcXPx = Math.min(baseWidth - 1, Math.floor(x * baseWidth / targetWidth));
+      const cellX = Math.min(gridWidth - 1, Math.floor(srcXPx / cellWidthPx));
+      output[y*targetWidth + x] = source[rowOffset + cellX] || 0;
+    }
+  }
+  return output;
+}
+
 function hexToRGB(hex){
   if(!hex || hex === 'transparent'){
     return [255,255,255];
@@ -2327,74 +2606,119 @@ function hexToRGB(hex){
   ];
 }
 
-function encodeBinaryGif(frames, width, height, durations, bgColor, fgColor){
+function encodeIndexedGif(frames, width, height, durations, palette, transparentIndex){
   const bytes = [];
   const writeByte = (b) => bytes.push(b & 0xFF);
   const writeWord = (w) => { writeByte(w & 0xFF); writeByte((w >> 8) & 0xFF); };
   const pushString = (str) => { for(let i=0;i<str.length;i++) writeByte(str.charCodeAt(i)); };
-  const transparent = !bgColor || bgColor === 'transparent';
-  const bg = transparent ? [0,0,0] : hexToRGB(bgColor);
-  const fg = hexToRGB(fgColor);
+  const paletteSize = Math.max(1, Math.floor((palette ? palette.length : 0) / 3));
+  const tableSize = 1 << Math.ceil(Math.log2(Math.max(2, paletteSize)));
+  const gctBits = Math.max(0, Math.ceil(Math.log2(tableSize)) - 1);
   pushString('GIF89a');
   writeWord(width);
   writeWord(height);
-  const packedFields = 0x80; // global color table present, 2 entries
+  const packedFields = 0x80 | (gctBits << 4) | gctBits;
   writeByte(packedFields);
+  writeByte(Math.max(0, transparentIndex));
   writeByte(0x00);
-  writeByte(0x00);
-  writeByte(bg[0]); writeByte(bg[1]); writeByte(bg[2]);
-  writeByte(fg[0]); writeByte(fg[1]); writeByte(fg[2]);
+  const globalTable = new Uint8Array(tableSize * 3);
+  if(palette){
+    globalTable.set(palette.subarray(0, Math.min(palette.length, globalTable.length)));
+  }
+  for(let i=0;i<globalTable.length;i++){
+    writeByte(globalTable[i]);
+  }
   writeByte(0x21); writeByte(0xFF); writeByte(0x0B);
   pushString('NETSCAPE2.0');
   writeByte(0x03); writeByte(0x01); writeWord(0x0000); writeByte(0x00);
   for(let i=0;i<frames.length;i++){
     const delay = Math.max(1, Math.round((durations[i] || 100) / 10));
     writeByte(0x21); writeByte(0xF9); writeByte(0x04);
-    writeByte(transparent ? 0x01 : 0x00);
-    writeByte(delay & 0xFF); writeByte((delay >> 8) & 0xFF);
-    writeByte(transparent ? 0x00 : 0x00);
+    writeByte(transparentIndex >= 0 ? 0x01 : 0x00);
+    writeWord(delay);
+    writeByte(transparentIndex >= 0 ? transparentIndex : 0);
     writeByte(0x00);
     writeByte(0x2C);
     writeWord(0); writeWord(0);
     writeWord(width); writeWord(height);
     writeByte(0x00);
-    writeBinaryImageData(frames[i]);
+    writeIndexedImageData(frames[i], tableSize);
   }
   writeByte(0x3B);
   return new Uint8Array(bytes);
 
-  function writeBinaryImageData(indexes){
-    const minCodeSize = 2;
+  function writeIndexedImageData(indexes, tableSize){
+    const minCodeSize = Math.max(2, Math.ceil(Math.log2(Math.max(2, tableSize))));
     writeByte(minCodeSize);
     const clearCode = 1 << minCodeSize;
     const eoiCode = clearCode + 1;
-    const codeSize = minCodeSize + 1;
-    const data = [];
+    let codeSize = minCodeSize + 1;
+    let dictSize = eoiCode + 1;
+    const dictionary = new Map();
+    const dataBytes = [];
     let buffer = 0;
     let bits = 0;
-    const pushCode = (code) => {
+
+    const pushDataByte = (byte) => {
+      dataBytes.push(byte & 0xFF);
+    };
+
+    const emitCode = (code) => {
       buffer |= code << bits;
       bits += codeSize;
       while(bits >= 8){
-        data.push(buffer & 0xFF);
+        pushDataByte(buffer & 0xFF);
         buffer >>= 8;
         bits -= 8;
       }
     };
-    pushCode(clearCode);
-    for(let i=0;i<indexes.length;i++){
-      pushCode(indexes[i]);
+
+    const resetDictionary = () => {
+      dictionary.clear();
+      codeSize = minCodeSize + 1;
+      dictSize = eoiCode + 1;
+      emitCode(clearCode);
+    };
+
+    resetDictionary();
+
+    if(!indexes || !indexes.length){
+      emitCode(eoiCode);
+    }else{
+      let prefix = indexes[0] || 0;
+      for(let i=1;i<indexes.length;i++){
+        const value = indexes[i] || 0;
+        const key = (prefix << 12) | value;
+        if(dictionary.has(key)){
+          prefix = dictionary.get(key);
+          continue;
+        }
+        emitCode(prefix);
+        if(dictSize < 4096){
+          dictionary.set(key, dictSize++);
+          if(dictSize === (1 << codeSize) && codeSize < 12){
+            codeSize++;
+          }
+          if(dictSize >= 4096){
+            resetDictionary();
+          }
+        }else{
+          resetDictionary();
+        }
+        prefix = value;
+      }
+      emitCode(prefix);
+      emitCode(eoiCode);
     }
-    pushCode(eoiCode);
     if(bits > 0){
-      data.push(buffer & 0xFF);
+      pushDataByte(buffer & 0xFF);
     }
     let offset = 0;
-    while(offset < data.length){
-      const size = Math.min(255, data.length - offset);
+    while(offset < dataBytes.length){
+      const size = Math.min(255, dataBytes.length - offset);
       writeByte(size);
       for(let i=0;i<size;i++){
-        writeByte(data[offset++]);
+        writeByte(dataBytes[offset++]);
       }
     }
     writeByte(0x00);
