@@ -1,3 +1,6 @@
+import { applyToCanvas } from './postfx.js';
+import { ensureEffect } from './effects/index.js';
+
 const $ = (id) => document.getElementById(id);
 
 const preview = $('preview');
@@ -41,6 +44,231 @@ const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
 };
+
+const MAX_TEXTURE_SIZE = 1024;
+
+function clamp01(value){
+  const num = Number(value);
+  if(!Number.isFinite(num)) return 0;
+  if(num < 0) return 0;
+  if(num > 1) return 1;
+  return num;
+}
+
+function clampFloat(value, min, max){
+  const num = Number(value);
+  if(!Number.isFinite(num)) return min;
+  if(num < min) return min;
+  if(num > max) return max;
+  return num;
+}
+
+function clampIntValue(value, min, max){
+  const num = parseInt(value, 10);
+  if(Number.isNaN(num)) return min;
+  if(num < min) return min;
+  if(num > max) return max;
+  return num;
+}
+
+const POST_FX_DEFS = [
+  {
+    name: 'duotone',
+    label: 'DUOTONE',
+    shortcut: 'D',
+    params: [
+      { key: 'lowColor', type: 'color', label: 'SCURO', default: '#000000' },
+      { key: 'highColor', type: 'color', label: 'CHIARO', default: '#ffffff' },
+      { key: 'mix', type: 'range', label: 'MIX', min: 0, max: 1, step: 0.05, default: 1 }
+    ],
+    build(values){
+      return {
+        lowColor: hexToRGB(values.lowColor || '#000000'),
+        highColor: hexToRGB(values.highColor || '#ffffff'),
+        mix: clamp01(values.mix)
+      };
+    }
+  },
+  {
+    name: 'tint',
+    label: 'TINT',
+    shortcut: 'T',
+    params: [
+      { key: 'color', type: 'color', label: 'COLORE', default: '#ff7800' },
+      { key: 'opacity', type: 'range', label: 'OPACITÀ', min: 0, max: 1, step: 0.05, default: 0.35 },
+      { key: 'mode', type: 'select', label: 'MODALITÀ', default: 'overlay', options: [
+        { value: 'overlay', label: 'OVERLAY' },
+        { value: 'multiply', label: 'MULTIPLY' },
+        { value: 'screen', label: 'SCREEN' }
+      ] }
+    ],
+    build(values){
+      return {
+        color: hexToRGB(values.color || '#ff7800'),
+        opacity: clamp01(values.opacity),
+        mode: values.mode || 'overlay'
+      };
+    }
+  },
+  {
+    name: 'vignette',
+    label: 'VIGNETTE',
+    shortcut: 'V',
+    params: [
+      { key: 'strength', type: 'range', label: 'FORZA', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { key: 'radius', type: 'range', label: 'RAGGIO', min: 0.1, max: 1, step: 0.05, default: 0.75 },
+      { key: 'centerX', type: 'range', label: 'CENTRO X', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { key: 'centerY', type: 'range', label: 'CENTRO Y', min: 0, max: 1, step: 0.05, default: 0.5 }
+    ],
+    build(values){
+      return {
+        strength: clamp01(values.strength),
+        radius: clampFloat(values.radius, 0.1, 1),
+        centerX: clamp01(values.centerX),
+        centerY: clamp01(values.centerY)
+      };
+    }
+  },
+  {
+    name: 'noise',
+    label: 'NOISE',
+    shortcut: 'N',
+    params: [
+      { key: 'intensity', type: 'range', label: 'INTENSITÀ', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { key: 'mono', type: 'checkbox', label: 'MONO', default: false },
+      { key: 'seed', type: 'number', label: 'SEED', min: 0, max: 9999, step: 1, default: 1337 }
+    ],
+    build(values){
+      return {
+        intensity: clamp01(values.intensity),
+        mono: Boolean(values.mono),
+        seed: clampIntValue(values.seed, 0, 9999)
+      };
+    }
+  },
+  {
+    name: 'scanlines',
+    label: 'SCANLINES',
+    shortcut: 'S',
+    params: [
+      { key: 'thickness', type: 'range', label: 'SPESSORE', min: 1, max: 12, step: 1, default: 2 },
+      { key: 'strength', type: 'range', label: 'FORZA', min: 0, max: 1, step: 0.05, default: 0.4 },
+      { key: 'mode', type: 'select', label: 'MODALITÀ', default: 'mono', options: [
+        { value: 'mono', label: 'MONO' },
+        { value: 'rgb', label: 'RGB' }
+      ] }
+    ],
+    build(values){
+      return {
+        thickness: clampIntValue(values.thickness, 1, 20),
+        strength: clamp01(values.strength),
+        mode: values.mode === 'rgb' ? 'rgb' : 'mono'
+      };
+    }
+  },
+  {
+    name: 'textureOverlay',
+    label: 'TEXTURE',
+    shortcut: 'X',
+    params: [
+      { key: 'opacity', type: 'range', label: 'OPACITÀ', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { key: 'mode', type: 'select', label: 'BLEND', default: 'overlay', options: [
+        { value: 'overlay', label: 'OVERLAY' },
+        { value: 'multiply', label: 'MULTIPLY' },
+        { value: 'screen', label: 'SCREEN' }
+      ] },
+      { key: 'texture', type: 'texture', label: 'TEXTURE', default: null }
+    ],
+    build(values){
+      return {
+        opacity: clamp01(values.opacity),
+        mode: values.mode || 'overlay',
+        texture: values.texture || null
+      };
+    }
+  },
+  {
+    name: 'rgbSplit',
+    label: 'RGB SPLIT',
+    shortcut: 'R',
+    params: [
+      { key: 'offsetRx', type: 'range', label: 'R X', min: -40, max: 40, step: 1, default: 3 },
+      { key: 'offsetRy', type: 'range', label: 'R Y', min: -40, max: 40, step: 1, default: 0 },
+      { key: 'offsetGx', type: 'range', label: 'G X', min: -40, max: 40, step: 1, default: 0 },
+      { key: 'offsetGy', type: 'range', label: 'G Y', min: -40, max: 40, step: 1, default: 0 },
+      { key: 'offsetBx', type: 'range', label: 'B X', min: -40, max: 40, step: 1, default: -3 },
+      { key: 'offsetBy', type: 'range', label: 'B Y', min: -40, max: 40, step: 1, default: 0 },
+      { key: 'feather', type: 'range', label: 'FEATHER', min: 0, max: 1, step: 0.05, default: 0.35 }
+    ],
+    build(values){
+      return {
+        offsetR: { x: clampFloat(values.offsetRx, -40, 40), y: clampFloat(values.offsetRy, -40, 40) },
+        offsetG: { x: clampFloat(values.offsetGx, -40, 40), y: clampFloat(values.offsetGy, -40, 40) },
+        offsetB: { x: clampFloat(values.offsetBx, -40, 40), y: clampFloat(values.offsetBy, -40, 40) },
+        feather: clamp01(values.feather)
+      };
+    }
+  },
+  {
+    name: 'bloom',
+    label: 'BLOOM',
+    shortcut: 'B',
+    params: [
+      { key: 'threshold', type: 'range', label: 'SOGLIA', min: 0, max: 1, step: 0.05, default: 0.6 },
+      { key: 'radius', type: 'range', label: 'RAGGIO', min: 1, max: 40, step: 1, default: 8 },
+      { key: 'intensity', type: 'range', label: 'INTENSITÀ', min: 0, max: 1, step: 0.05, default: 0.4 }
+    ],
+    build(values){
+      return {
+        threshold: clamp01(values.threshold),
+        radius: clampFloat(values.radius, 1, 80),
+        intensity: clamp01(values.intensity)
+      };
+    }
+  },
+  {
+    name: 'glitch',
+    label: 'GLITCH',
+    shortcut: 'G',
+    params: [
+      { key: 'amount', type: 'range', label: 'AMOUNT', min: 0, max: 1, step: 0.05, default: 0.35 },
+      { key: 'maxShift', type: 'range', label: 'SHIFT', min: 1, max: 80, step: 1, default: 12 },
+      { key: 'seed', type: 'number', label: 'SEED', min: 0, max: 9999, step: 1, default: 7 }
+    ],
+    build(values){
+      return {
+        amount: clamp01(values.amount),
+        maxShift: clampFloat(values.maxShift, 1, 120),
+        seed: clampIntValue(values.seed, 0, 9999)
+      };
+    }
+  },
+  {
+    name: 'wave',
+    label: 'WAVE',
+    shortcut: 'W',
+    params: [
+      { key: 'amp', type: 'range', label: 'AMP', min: -60, max: 60, step: 1, default: 8 },
+      { key: 'freq', type: 'range', label: 'FREQ', min: 0.01, max: 0.2, step: 0.01, default: 0.05 },
+      { key: 'dir', type: 'select', label: 'DIREZIONE', default: 'x', options: [
+        { value: 'x', label: 'ORIZZONTALE' },
+        { value: 'y', label: 'VERTICALE' }
+      ] }
+    ],
+    build(values){
+      return {
+        amp: clampFloat(values.amp, -200, 200),
+        freq: clampFloat(values.freq, 0.001, 1),
+        dir: values.dir === 'y' ? 'y' : 'x'
+      };
+    }
+  }
+];
+
+const postFxState = {};
+const postFxUI = new Map();
+let postFxPreviewNextCanvas = null;
+let postFxPreviewRunning = false;
 
 const THERMAL_PALETTE_KEY = 'thermal_v2';
 const THERMAL_COLOR_STOPS = [
@@ -158,6 +386,8 @@ function init(){
   bindDropzone();
   bindExportModal();
   bindPlaybackControl();
+  initPostFxPanel();
+  bindPostFxShortcuts();
   if(controls.asciiChars){
     controls.asciiChars.value = state.customASCIIString;
   }
@@ -647,6 +877,429 @@ function bindPlaybackControl(){
       updatePlaybackButton(true, false);
     }
   });
+}
+
+let postFxRefreshTimer = null;
+
+function initPostFxPanel(){
+  initPostFxState();
+  const container = $('postFxControls');
+  if(!container){
+    return;
+  }
+  container.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  POST_FX_DEFS.forEach((def) => {
+    const entry = postFxState[def.name];
+    const card = buildPostFxCard(def, entry);
+    postFxUI.set(def.name, card);
+    frag.appendChild(card.element);
+  });
+  container.appendChild(frag);
+}
+
+function initPostFxState(){
+  POST_FX_DEFS.forEach((def) => {
+    if(postFxState[def.name]) return;
+    const values = {};
+    def.params.forEach((param) => {
+      values[param.key] = clonePostFxDefault(param.default);
+    });
+    postFxState[def.name] = { enabled: false, values };
+  });
+}
+
+function clonePostFxDefault(value){
+  if(Array.isArray(value)) return value.slice();
+  if(value && typeof value === 'object') return JSON.parse(JSON.stringify(value));
+  return value;
+}
+
+function buildPostFxCard(def, entry){
+  const card = document.createElement('div');
+  card.className = 'postfx-card';
+  const header = document.createElement('div');
+  header.className = 'postfx-header';
+  const title = document.createElement('span');
+  title.className = 'postfx-title';
+  title.textContent = def.label;
+  header.appendChild(title);
+
+  const toggleWrap = document.createElement('div');
+  toggleWrap.className = 'postfx-toggle-wrap';
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.className = 'postfx-toggle';
+  toggle.id = `postfx-${def.name}-toggle`;
+  toggle.checked = Boolean(entry && entry.enabled);
+  const toggleStatus = document.createElement('span');
+  toggleStatus.className = 'postfx-toggle-status';
+  toggleStatus.textContent = toggle.checked ? 'ON' : 'OFF';
+  toggle.addEventListener('change', () => {
+    handlePostFxToggle(def.name, toggle.checked);
+  });
+  toggleWrap.appendChild(toggle);
+  toggleWrap.appendChild(toggleStatus);
+  header.appendChild(toggleWrap);
+
+  const fieldsWrap = document.createElement('div');
+  fieldsWrap.className = 'postfx-fields';
+  const controls = [];
+  def.params.forEach((param) => {
+    const currentValue = entry ? entry.values[param.key] : clonePostFxDefault(param.default);
+    const field = createPostFxField(def, param, currentValue);
+    controls.push(field);
+    fieldsWrap.appendChild(field.element);
+  });
+
+  if(toggle.checked){
+    card.classList.add('is-active');
+  }
+
+  card.appendChild(header);
+  card.appendChild(fieldsWrap);
+
+  return { element: card, toggle, toggleStatus, controls, fieldsWrap, def };
+}
+
+function createPostFxField(def, param, value){
+  const field = document.createElement('div');
+  field.className = 'field postfx-field';
+  const label = document.createElement('label');
+  label.textContent = param.label || param.key.toUpperCase();
+  field.appendChild(label);
+  let setValue = () => {};
+  if(param.type === 'range'){
+    const sliderWrap = document.createElement('div');
+    sliderWrap.className = 'slider';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = param.min != null ? String(param.min) : '0';
+    range.max = param.max != null ? String(param.max) : '1';
+    range.step = param.step != null ? String(param.step) : '0.01';
+    range.value = value != null ? String(value) : String(param.default || 0);
+    const number = document.createElement('input');
+    number.type = 'number';
+    number.className = 'num';
+    if(param.min != null) number.min = String(param.min);
+    if(param.max != null) number.max = String(param.max);
+    number.step = param.step != null ? String(param.step) : '0.01';
+    number.value = range.value;
+    const commit = (raw) => {
+      const parsed = Number(raw);
+      const safe = Number.isFinite(parsed) ? parsed : Number(range.value);
+      range.value = String(safe);
+      number.value = String(safe);
+      handlePostFxParamChange(def, param, safe);
+    };
+    range.addEventListener('input', () => {
+      number.value = range.value;
+      handlePostFxParamChange(def, param, Number(range.value));
+    });
+    range.addEventListener('change', () => commit(range.value));
+    number.addEventListener('change', () => commit(number.value));
+    sliderWrap.appendChild(range);
+    sliderWrap.appendChild(number);
+    field.appendChild(sliderWrap);
+    setValue = (val) => {
+      range.value = String(val);
+      number.value = String(val);
+    };
+  }else if(param.type === 'number'){
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = value != null ? String(value) : String(param.default || 0);
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    input.addEventListener('change', () => {
+      const parsed = Number(input.value);
+      const safe = Number.isFinite(parsed) ? parsed : Number(param.default || 0);
+      input.value = String(safe);
+      handlePostFxParamChange(def, param, safe);
+    });
+    field.appendChild(input);
+    setValue = (val) => {
+      input.value = String(val);
+    };
+  }else if(param.type === 'color'){
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = typeof value === 'string' ? value : (param.default || '#000000');
+    input.addEventListener('change', () => {
+      handlePostFxParamChange(def, param, input.value || param.default);
+    });
+    field.appendChild(input);
+    setValue = (val) => {
+      input.value = val;
+    };
+  }else if(param.type === 'select'){
+    const select = document.createElement('select');
+    (param.options || []).forEach((opt) => {
+      const option = document.createElement('option');
+      option.value = opt.value;
+      option.textContent = opt.label || opt.value;
+      select.appendChild(option);
+    });
+    select.value = value != null ? String(value) : String(param.default || '');
+    select.addEventListener('change', () => {
+      handlePostFxParamChange(def, param, select.value);
+    });
+    field.appendChild(select);
+    setValue = (val) => {
+      select.value = String(val);
+    };
+  }else if(param.type === 'checkbox'){
+    const wrapper = document.createElement('div');
+    wrapper.className = 'postfx-checkbox';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = Boolean(value);
+    input.addEventListener('change', () => {
+      handlePostFxParamChange(def, param, input.checked);
+    });
+    wrapper.appendChild(input);
+    field.appendChild(wrapper);
+    setValue = (val) => {
+      input.checked = Boolean(val);
+    };
+  }else if(param.type === 'texture'){
+    field.classList.add('postfx-field--texture');
+    const status = document.createElement('div');
+    status.className = 'postfx-texture-status';
+    status.textContent = value && value.name ? value.name : 'Nessuna texture';
+    const controlsRow = document.createElement('div');
+    controlsRow.className = 'postfx-texture-actions';
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*';
+    fileInput.hidden = true;
+    const loadBtn = document.createElement('button');
+    loadBtn.type = 'button';
+    loadBtn.textContent = 'CARICA';
+    loadBtn.addEventListener('click', () => fileInput.click());
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.textContent = 'RIMUOVI';
+    clearBtn.addEventListener('click', () => {
+      handlePostFxParamChange(def, param, null);
+      status.textContent = 'Nessuna texture';
+    });
+    fileInput.addEventListener('change', async () => {
+      if(!fileInput.files || !fileInput.files[0]) return;
+      const file = fileInput.files[0];
+      const texture = await loadTextureBitmap(file);
+      if(texture){
+        texture.name = file.name;
+        status.textContent = file.name;
+        handlePostFxParamChange(def, param, texture);
+      }
+    });
+    controlsRow.appendChild(loadBtn);
+    controlsRow.appendChild(clearBtn);
+    field.appendChild(status);
+    field.appendChild(controlsRow);
+    field.appendChild(fileInput);
+    setValue = (val) => {
+      if(val && val.name){
+        status.textContent = val.name;
+      }else{
+        status.textContent = 'Nessuna texture';
+      }
+    };
+  }
+  return { element: field, setValue };
+}
+
+async function loadTextureBitmap(file){
+  let bitmap = null;
+  try{
+    if(typeof createImageBitmap === 'function'){
+      bitmap = await createImageBitmap(file);
+      const target = downscaleBitmap(bitmap, MAX_TEXTURE_SIZE);
+      const ctx = target.getContext('2d', {willReadFrequently: true});
+      if(!ctx){
+        if(bitmap && typeof bitmap.close === 'function') bitmap.close();
+        return null;
+      }
+      ctx.drawImage(bitmap, 0, 0, target.width, target.height);
+      const data = ctx.getImageData(0, 0, target.width, target.height);
+      if(bitmap && typeof bitmap.close === 'function'){
+        bitmap.close();
+      }
+      return { width: data.width, height: data.height, data: new Uint8ClampedArray(data.data), name: file.name };
+    }
+    const img = await loadImageFromFile(file);
+    const target = downscaleBitmap(img, MAX_TEXTURE_SIZE);
+    const ctx = target.getContext('2d', {willReadFrequently: true});
+    if(!ctx){
+      return null;
+    }
+    ctx.drawImage(img, 0, 0, target.width, target.height);
+    const data = ctx.getImageData(0, 0, target.width, target.height);
+    return { width: data.width, height: data.height, data: new Uint8ClampedArray(data.data), name: file.name };
+  }catch(err){
+    console.error('Texture load failed', err);
+    if(bitmap && typeof bitmap.close === 'function'){
+      bitmap.close();
+    }
+    return null;
+  }
+}
+
+function downscaleBitmap(source, maxSize){
+  const width = source.width || source.naturalWidth || 0;
+  const height = source.height || source.naturalHeight || 0;
+  const canvas = document.createElement('canvas');
+  if(width <= maxSize && height <= maxSize){
+    canvas.width = width;
+    canvas.height = height;
+    return canvas;
+  }
+  const scale = maxSize / Math.max(width, height);
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  return canvas;
+}
+
+function loadImageFromFile(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = (event) => {
+      URL.revokeObjectURL(url);
+      reject(event instanceof ErrorEvent ? event.error : new Error('Texture image load failed'));
+    };
+    img.src = url;
+  });
+}
+
+function handlePostFxToggle(name, enabled){
+  const entry = postFxState[name];
+  if(!entry) return;
+  entry.enabled = enabled;
+  const ui = postFxUI.get(name);
+  if(ui){
+    ui.toggle.checked = enabled;
+    if(ui.toggleStatus){
+      ui.toggleStatus.textContent = enabled ? 'ON' : 'OFF';
+    }
+    ui.element.classList.toggle('is-active', enabled);
+  }
+  if(enabled){
+    ensureEffect(name).catch((err) => console.error('Effetto non caricato', err));
+  }
+  schedulePostFxRefresh(true);
+}
+
+function handlePostFxParamChange(def, param, value){
+  const entry = postFxState[def.name];
+  if(!entry) return;
+  entry.values[param.key] = value;
+  if(entry.enabled){
+    schedulePostFxRefresh(false);
+  }
+}
+
+function schedulePostFxRefresh(immediate){
+  if(immediate){
+    if(postFxRefreshTimer){
+      clearTimeout(postFxRefreshTimer);
+      postFxRefreshTimer = null;
+    }
+    refreshPostFxPreview();
+    return;
+  }
+  if(postFxRefreshTimer){
+    clearTimeout(postFxRefreshTimer);
+  }
+  postFxRefreshTimer = setTimeout(() => {
+    postFxRefreshTimer = null;
+    refreshPostFxPreview();
+  }, 90);
+}
+
+function refreshPostFxPreview(){
+  if(!state.lastPreview){
+    return;
+  }
+  renderPreview(state.lastPreview, state.lastScale);
+  updateMeta(state.lastSize.width, state.lastSize.height);
+}
+
+function collectActivePostFxEffects(){
+  const active = [];
+  for(const def of POST_FX_DEFS){
+    const entry = postFxState[def.name];
+    if(!entry || !entry.enabled) continue;
+    const params = def.build ? def.build(entry.values) : {...entry.values};
+    if(def.name === 'textureOverlay' && (!params.texture || !params.texture.data)){
+      continue;
+    }
+    active.push({ name: def.name, params });
+  }
+  return active;
+}
+
+function bindPostFxShortcuts(){
+  document.addEventListener('keydown', (event) => {
+    if(event.defaultPrevented) return;
+    const target = event.target;
+    if(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)){
+      return;
+    }
+    const key = event.key && event.key.toUpperCase();
+    if(!key) return;
+    const def = POST_FX_DEFS.find((fx) => fx.shortcut && fx.shortcut.toUpperCase() === key);
+    if(!def) return;
+    event.preventDefault();
+    const entry = postFxState[def.name];
+    if(!entry) return;
+    handlePostFxToggle(def.name, !entry.enabled);
+  });
+}
+
+function queuePostFxPreview(canvas){
+  if(!canvas) return;
+  if(!collectActivePostFxEffects().length){
+    return;
+  }
+  postFxPreviewNextCanvas = canvas;
+  if(postFxPreviewRunning){
+    return;
+  }
+  postFxPreviewRunning = true;
+  const process = async () => {
+    while(postFxPreviewNextCanvas){
+      const target = postFxPreviewNextCanvas;
+      postFxPreviewNextCanvas = null;
+      const effects = collectActivePostFxEffects();
+      if(!effects.length){
+        break;
+      }
+      try{
+        await applyToCanvas(target, effects, { preview: true, maxDimension: 1024 });
+      }catch(err){
+        console.error('Post-FX preview error', err);
+      }
+    }
+    postFxPreviewRunning = false;
+  };
+  process();
+}
+
+async function applyPostFxForExport(canvas){
+  const effects = collectActivePostFxEffects();
+  if(!effects.length) return;
+  try{
+    await applyToCanvas(canvas, effects, { preview: false });
+  }catch(err){
+    console.error('Post-FX export error', err);
+  }
 }
 
 function beginUpload(name=''){
@@ -1886,6 +2539,7 @@ function drawAnimationFrame(player, index){
     glow: player.data.glow
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
+  queuePostFxPreview(player.canvas);
 }
 
 function renderPreview(previewData, scale){
@@ -2172,6 +2826,7 @@ function drawPreviewFrame(canvas, data, width, height, dpr){
     ctx.scale(dpr, dpr);
   }
   paintFrame(ctx, data, width, height);
+  queuePostFxPreview(canvas);
 }
 
 function schedulePreviewRefresh(){
@@ -2335,6 +2990,7 @@ async function downloadRaster(format){
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
   const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
+  await applyPostFxForExport(canvas);
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
@@ -2345,23 +3001,68 @@ async function downloadGIF(){
   const options = collectRenderOptions();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
-  const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
-  if(!indexedFrames.length){
-    throw new Error('Nessun frame disponibile per la GIF');
-  }
-  const referencePalette = indexedFrames[0].palette;
-  const transparentIndex = indexedFrames[0].transparentIndex;
-  for(let i=1;i<indexedFrames.length;i++){
-    if(!palettesMatch(referencePalette, indexedFrames[i].palette)){
-      throw new Error('Palette incoerenti tra i frame GIF');
+  const postFxEffects = collectActivePostFxEffects();
+  if(!postFxEffects.length){
+    const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
+    if(!indexedFrames.length){
+      throw new Error('Nessun frame disponibile per la GIF');
     }
+    const referencePalette = indexedFrames[0].palette;
+    const transparentIndex = indexedFrames[0].transparentIndex;
+    for(let i=1;i<indexedFrames.length;i++){
+      if(!palettesMatch(referencePalette, indexedFrames[i].palette)){
+        throw new Error('Palette incoerenti tra i frame GIF');
+      }
+    }
+    const gifBytes = encodeIndexedGif(
+      indexedFrames.map((f) => f.indexes),
+      dims.width,
+      dims.height,
+      exportData.durations,
+      referencePalette,
+      transparentIndex
+    );
+    const blob = new Blob([gifBytes], {type:'image/gif'});
+    triggerDownload(blob, 'bitmap.gif');
+    return;
   }
+
+  const frameImages = [];
+  const colorSamples = [];
+  let hasTransparency = options.bg === 'transparent';
+  const durations = exportData.durations;
+  for(let i=0;i<exportData.frames.length;i++){
+    const canvas = createExportCanvas(dims.width, dims.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if(!ctx){
+      throw new Error('Impossibile elaborare il frame GIF');
+    }
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0, 0, dims.width, dims.height);
+    const frame = exportData.frames[i];
+    const frameData = {
+      ...frame,
+      type: frame.kind,
+      bg: options.bg,
+      fg: options.fg,
+      glow: options.glow
+    };
+    paintFrame(ctx, frameData, dims.width, dims.height);
+    await applyToCanvas(canvas, postFxEffects, { preview: false });
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    frameImages.push(imageData);
+    hasTransparency = collectGifColorSamples(imageData, colorSamples, hasTransparency);
+  }
+  const paletteInfo = buildGifPalette(colorSamples, hasTransparency);
+  const palette = paletteInfo.palette;
+  const transparentIndex = paletteInfo.transparentIndex;
+  const indexedFrames = frameImages.map((imageData) => imageDataToPaletteIndexes(imageData, palette, transparentIndex));
   const gifBytes = encodeIndexedGif(
-    indexedFrames.map((f) => f.indexes),
+    indexedFrames,
     dims.width,
     dims.height,
-    exportData.durations,
-    referencePalette,
+    durations,
+    palette,
     transparentIndex
   );
   const blob = new Blob([gifBytes], {type:'image/gif'});
@@ -2378,6 +3079,7 @@ async function downloadMP4(){
     throw new Error('Nessun formato MP4/WebM supportato per la registrazione');
   }
   const options = collectRenderOptions();
+  const postFxEffects = collectActivePostFxEffects();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
   const canvas = createExportCanvas(dims.width, dims.height, {forceDOM: true});
@@ -2405,7 +3107,12 @@ async function downloadMP4(){
       fg: options.fg,
       glow: options.glow
     };
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0, 0, dims.width, dims.height);
     paintFrame(ctx, frameData, dims.width, dims.height);
+    if(postFxEffects.length){
+      await applyToCanvas(canvas, postFxEffects, { preview: false });
+    }
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
   }
@@ -2583,6 +3290,207 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
   );
   const paletteInfo = buildBinaryPalette(options.bg, options.fg);
   return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+}
+
+function collectGifColorSamples(imageData, samples, hasTransparency){
+  if(!imageData || !imageData.data) return hasTransparency;
+  const { data, width, height } = imageData;
+  const totalPixels = width * height;
+  if(totalPixels <= 0) return hasTransparency;
+  const limit = 65536;
+  const step = Math.max(1, Math.floor(Math.sqrt(totalPixels / 4096)));
+  outer: for(let y=0;y<height;y+=step){
+    for(let x=0;x<width;x+=step){
+      const idx = (y * width + x) * 4;
+      const alpha = data[idx+3];
+      if(alpha < 32){
+        hasTransparency = true;
+        continue;
+      }
+      const color = (data[idx] << 16) | (data[idx+1] << 8) | data[idx+2];
+      samples.push(color);
+      if(samples.length >= limit){
+        break outer;
+      }
+    }
+  }
+  return hasTransparency;
+}
+
+function buildGifPalette(samples, hasTransparency){
+  const targetColors = Math.max(1, Math.min(256 - (hasTransparency ? 1 : 0), samples.length || 1));
+  const paletteColors = medianCutQuantize(samples, targetColors);
+  const totalColors = paletteColors.length + (hasTransparency ? 1 : 0);
+  const finalColors = Math.max(2, totalColors);
+  const palette = new Uint8Array(finalColors * 3);
+  let offset = 0;
+  let transparentIndex = -1;
+  if(hasTransparency){
+    transparentIndex = 0;
+    palette[offset++] = 0;
+    palette[offset++] = 0;
+    palette[offset++] = 0;
+  }
+  for(let i=0;i<paletteColors.length && offset < palette.length;i++){
+    const color = paletteColors[i];
+    palette[offset++] = (color >> 16) & 0xFF;
+    palette[offset++] = (color >> 8) & 0xFF;
+    palette[offset++] = color & 0xFF;
+  }
+  if(offset < palette.length){
+    const fallbackColor = paletteColors.length
+      ? paletteColors[paletteColors.length - 1]
+      : 0;
+    const r = (fallbackColor >> 16) & 0xFF;
+    const g = (fallbackColor >> 8) & 0xFF;
+    const b = fallbackColor & 0xFF;
+    while(offset < palette.length){
+      palette[offset++] = r;
+      palette[offset++] = g;
+      palette[offset++] = b;
+    }
+  }
+  return { palette, transparentIndex };
+}
+
+function medianCutQuantize(colors, maxColors){
+  if(!colors || !colors.length){
+    return [0];
+  }
+  const boxes = [createColorBox(colors.slice())];
+  while(boxes.length < maxColors){
+    boxes.sort((a, b) => colorBoxRange(b) - colorBoxRange(a));
+    const box = boxes.shift();
+    if(!box || box.colors.length <= 1){
+      if(box){
+        boxes.push(box);
+      }
+      break;
+    }
+    const channel = boxWidestChannel(box);
+    const sorted = box.colors.slice().sort((a, b) => channelValue(a, channel) - channelValue(b, channel));
+    const mid = Math.floor(sorted.length / 2);
+    if(mid <= 0 || mid >= sorted.length){
+      boxes.push(box);
+      break;
+    }
+    boxes.push(createColorBox(sorted.slice(0, mid)));
+    boxes.push(createColorBox(sorted.slice(mid)));
+  }
+  return boxes.slice(0, maxColors).map((box) => averageColor(box.colors));
+}
+
+function createColorBox(colors){
+  const box = {
+    colors,
+    rMin: 255,
+    rMax: 0,
+    gMin: 255,
+    gMax: 0,
+    bMin: 255,
+    bMax: 0
+  };
+  for(let i=0;i<colors.length;i++){
+    const color = colors[i];
+    const r = (color >> 16) & 0xFF;
+    const g = (color >> 8) & 0xFF;
+    const b = color & 0xFF;
+    if(r < box.rMin) box.rMin = r;
+    if(r > box.rMax) box.rMax = r;
+    if(g < box.gMin) box.gMin = g;
+    if(g > box.gMax) box.gMax = g;
+    if(b < box.bMin) box.bMin = b;
+    if(b > box.bMax) box.bMax = b;
+  }
+  return box;
+}
+
+function colorBoxRange(box){
+  return Math.max(box.rMax - box.rMin, box.gMax - box.gMin, box.bMax - box.bMin);
+}
+
+function boxWidestChannel(box){
+  const rRange = box.rMax - box.rMin;
+  const gRange = box.gMax - box.gMin;
+  const bRange = box.bMax - box.bMin;
+  if(rRange >= gRange && rRange >= bRange) return 'r';
+  if(gRange >= rRange && gRange >= bRange) return 'g';
+  return 'b';
+}
+
+function channelValue(color, channel){
+  if(channel === 'r') return (color >> 16) & 0xFF;
+  if(channel === 'g') return (color >> 8) & 0xFF;
+  return color & 0xFF;
+}
+
+function averageColor(colors){
+  if(!colors.length){
+    return 0;
+  }
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for(let i=0;i<colors.length;i++){
+    const color = colors[i];
+    r += (color >> 16) & 0xFF;
+    g += (color >> 8) & 0xFF;
+    b += color & 0xFF;
+  }
+  const count = colors.length;
+  return ((Math.round(r / count) & 0xFF) << 16) |
+         ((Math.round(g / count) & 0xFF) << 8) |
+         (Math.round(b / count) & 0xFF);
+}
+
+function imageDataToPaletteIndexes(imageData, palette, transparentIndex){
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
+  const total = width * height;
+  const indexes = new Uint8Array(total);
+  const paletteLength = Math.max(1, Math.floor(palette.length / 3));
+  const skip = transparentIndex >= 0 ? 1 : 0;
+  const cache = new Map();
+  for(let i=0, p=0;i<data.length;i+=4,p++){
+    const alpha = data[i+3];
+    if(transparentIndex >= 0 && alpha < 32){
+      indexes[p] = transparentIndex;
+      continue;
+    }
+    const color = (data[i] << 16) | (data[i+1] << 8) | data[i+2];
+    let idx = cache.get(color);
+    if(idx == null){
+      idx = findNearestPaletteIndex(color, palette, skip, paletteLength);
+      cache.set(color, idx);
+    }
+    indexes[p] = idx;
+  }
+  return indexes;
+}
+
+function findNearestPaletteIndex(color, palette, offset, paletteLength){
+  const r = (color >> 16) & 0xFF;
+  const g = (color >> 8) & 0xFF;
+  const b = color & 0xFF;
+  let best = offset < paletteLength ? offset : 0;
+  let bestDist = Infinity;
+  for(let i=offset;i<paletteLength;i++){
+    const base = i * 3;
+    const pr = palette[base] || 0;
+    const pg = palette[base+1] || 0;
+    const pb = palette[base+2] || 0;
+    const dr = pr - r;
+    const dg = pg - g;
+    const db = pb - b;
+    const dist = dr*dr + dg*dg + db*db;
+    if(dist < bestDist){
+      bestDist = dist;
+      best = i;
+      if(dist === 0) break;
+    }
+  }
+  return best;
 }
 
 function buildBinaryPalette(bgColor, fgColor){
