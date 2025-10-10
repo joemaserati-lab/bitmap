@@ -35,9 +35,9 @@ body{display:flex;flex-direction:column;min-height:100dvh}
 .upload-progress .progress-bar{position:absolute;inset:0 auto 0 0;height:100%;width:0;background:#1a73e8;transition:width .2s ease}
 .upload-progress.is-indeterminate .progress-bar{width:40%;animation:uploadPulse 1.2s infinite ease-in-out}
 @keyframes uploadPulse{0%{margin-left:-40%}50%{margin-left:20%}100%{margin-left:100%}}
-.controls-body{flex:1 1 auto;display:flex;flex-direction:row;gap:16px;overflow-x:auto;overflow-y:hidden;padding:0 calc(6px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(6px + var(--safe-left));scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
+.controls-body{flex:1 1 auto;display:flex;flex-direction:row;gap:16px;overflow-x:auto;overflow-y:hidden;padding:0 calc(6px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(6px + var(--safe-left));scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
 .controls-body::-webkit-scrollbar{height:6px}
-.control-section{display:flex;flex-direction:column;gap:12px;padding:14px;border-radius:18px;border:1px solid #e6e6e6;background:var(--chip-bg);flex:0 0 100%;min-width:100%;scroll-snap-align:start}
+.control-section{display:flex;flex-direction:column;gap:12px;padding:14px;border-radius:18px;border:1px solid #e6e6e6;background:var(--chip-bg);flex:0 0 100%;min-width:100%;scroll-snap-align:start;scroll-snap-stop:always}
 .section-title{margin:0;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
 .field{flex:0 0 auto;min-width:0;width:100%;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .field[hidden]{display:none!important}

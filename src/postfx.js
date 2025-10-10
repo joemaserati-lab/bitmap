@@ -154,9 +154,18 @@ export async function applyToCanvas(canvas, effects, { preview = false, maxDimen
   }
   targetCtx.save();
   targetCtx.globalCompositeOperation = 'source-over';
+  if(typeof targetCtx.resetTransform === 'function'){
+    targetCtx.resetTransform();
+  }else{
+    targetCtx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  targetCtx.imageSmoothingEnabled = false;
   targetCtx.clearRect(0, 0, width, height);
   if(preview && (workWidth !== width || workHeight !== height)){
-    targetCtx.drawImage(supportsOffscreen ? previewCanvas : fallbackCanvas, 0, 0, width, height);
+    const source = supportsOffscreen ? previewCanvas : fallbackCanvas;
+    if(source){
+      targetCtx.drawImage(source, 0, 0, width, height);
+    }
   }else{
     targetCtx.putImageData(processed, 0, 0);
   }
