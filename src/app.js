@@ -2134,8 +2134,7 @@ function createFrameData(result, options){
     const finalWidth = adjusted.width;
     const finalHeight = adjusted.height;
     const normalizedCharsetString = charsetKey === 'ascii_custom'
-      ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
-      : effectiveCharset.join('');
+      ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)      : effectiveCharset.join('');
     return {
       kind: 'ascii',
       gridWidth: result.gridWidth,
