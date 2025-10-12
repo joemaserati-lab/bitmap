@@ -41,8 +41,7 @@ body{display:flex;flex-direction:column;min-height:100dvh}
 .fields-rail{display:flex;flex-direction:row;gap:12px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;padding-bottom:4px;scrollbar-width:thin;touch-action:pan-x}
 .fields-rail::-webkit-scrollbar{height:6px}
 .fields-rail::-webkit-scrollbar-thumb{background:#c8c8c8;border-radius:999px}
-.fields-rail>.field,.fields-rail>.postfx-rail{flex:0 0 100%;min-width:100%;scroll-snap-align:start;scroll-snap-stop:always}
-.fields-rail>.postfx-rail{display:flex;width:100%}
+.fields-rail>.field{flex:0 0 100%;min-width:100%;scroll-snap-align:start;scroll-snap-stop:always}
 .section-title{margin:0;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
 .field{flex:0 0 auto;min-width:0;width:100%;background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .field[hidden]{display:none!important}
@@ -61,28 +60,6 @@ body{display:flex;flex-direction:column;min-height:100dvh}
 .field>input[type='number']{width:100%;height:44px;padding:0 12px;border:1px solid var(--line);border-radius:10px;font-family:inherit;font-size:13px;background:var(--bg)}
 .field select{width:100%;height:44px;padding:0 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-family:inherit;font-size:13px;letter-spacing:.02em;text-transform:uppercase}
 .field input[type='color']{width:100%;height:44px;border:1px solid var(--line);border-radius:10px;padding:0;background:var(--bg)}
-.control-section--postfx{gap:14px}
-.control-section--postfx .field{background:transparent;border:0;padding:0}
-.postfx-container{display:flex;flex-direction:column;gap:12px;width:100%}
-.postfx-card{display:flex;flex-direction:column;gap:12px;padding:12px;border:1px solid #dedede;border-radius:16px;background:#fff;transition:border-color .2s,box-shadow .2s}
-.postfx-card.is-active{border-color:#222;box-shadow:0 6px 16px rgba(0,0,0,.08)}
-.postfx-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.postfx-title{font-weight:700;letter-spacing:.08em;font-size:12px;text-transform:uppercase}
-.postfx-toggle-wrap{display:flex;align-items:center;gap:8px}
-.postfx-toggle{width:46px;height:26px;border-radius:999px;appearance:none;background:#d0d0d0;position:relative;cursor:pointer;transition:background .2s}
-.postfx-toggle::after{content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .2s}
-.postfx-toggle:checked{background:#111}
-.postfx-toggle:checked::after{transform:translateX(20px)}
-.postfx-toggle-status{font-size:11px;font-weight:600;letter-spacing:.08em}
-.postfx-fields{display:flex;flex-direction:column;gap:10px}
-.postfx-field{background:#f7f7f7;border-radius:14px;padding:10px 12px;border:1px solid #ececec}
-.postfx-card.is-active .postfx-field{background:#f1f1f1}
-.postfx-field--texture{gap:6px}
-.postfx-texture-status{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
-.postfx-texture-actions{display:flex;gap:8px}
-.postfx-texture-actions button{flex:1;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;transition:background .2s}
-.postfx-texture-actions button:hover{background:#f0f0f0}
-.postfx-checkbox input{width:20px;height:20px;border-radius:6px}
 .btn-row{display:flex;gap:8px;flex-wrap:nowrap}
 .btn-row button{flex:1 1 auto;padding:9px;border:1px solid var(--line);border-radius:999px;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;background:var(--bg);cursor:pointer;transition:background .2s,border-color .2s}
 .btn-row button.secondary{flex:0 0 auto}
@@ -129,9 +106,7 @@ hr{border:0;border-top:1px solid #eee;margin:0;flex:0 0 auto;align-self:stretch;
   .controls-body::-webkit-scrollbar-thumb{background:#ccc;border-radius:999px}
   .control-section{background:transparent;border:0;padding:0;gap:14px;flex:1 0 auto;min-width:0;scroll-snap-align:none}
   .fields-rail{flex-direction:column;overflow:visible;scroll-snap-type:none;padding-bottom:0;margin:0}
-  .fields-rail>.field,.fields-rail>.postfx-rail{flex:0 0 auto;min-width:0;scroll-snap-align:none}
-  .control-section .field{background:var(--chip-bg)}
-  .control-section--postfx .postfx-card{background:var(--chip-bg);border-color:#cfcfcf}
-  .control-section--postfx .postfx-field{background:#fff}
+    .fields-rail>.field{flex:0 0 auto;min-width:0;scroll-snap-align:none}
+    .control-section .field{background:var(--chip-bg)}
   .btn-row{flex-wrap:wrap}
 }

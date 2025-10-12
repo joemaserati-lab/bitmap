@@ -18,7 +18,7 @@ const CONTROL_IDS = [
   'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
   'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
   'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
-  'dither','asciiChars','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
+  'dither','asciiChars','asciiWord','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
   'jpegQ','jpegQNum','rasterBG'
 ];
 
@@ -37,16 +37,17 @@ const RENDER_DEBOUNCE_MS = 90;
 const OFFSCREEN_SUPPORTED = typeof OffscreenCanvas !== 'undefined';
 
 const DEFAULT_ASCII_CUSTOM = ' .:-=+*#%@';
+const DEFAULT_ASCII_WORD = 'PIXEL';
 const ASCII_MIN_TILE = 8;
 const ASCII_CUSTOM_MAX = 64;
+const ASCII_WORD_MAX = 32;
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
-  ascii_pixel: [' ','░','▒','▓','█'],
-  ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
+  ascii_pixel: [' ','.',':','-','=','+','#','@'],
+  ascii_unicode: [' ','·',':','-','=','+','*','#','%','@'],
+  ascii_word: [' ','P','I','X','E','L']
 };
-
-const MAX_TEXTURE_SIZE = 1024;
 
 function clamp01(value){
   const num = Number(value);
@@ -71,205 +72,6 @@ function clampIntValue(value, min, max){
   if(num > max) return max;
   return num;
 }
-
-const POST_FX_DEFS = [
-  {
-    name: 'duotone',
-    label: 'DUOTONE',
-    shortcut: 'D',
-    params: [
-      { key: 'lowColor', type: 'color', label: 'SCURO', default: '#000000' },
-      { key: 'highColor', type: 'color', label: 'CHIARO', default: '#ffffff' },
-      { key: 'mix', type: 'range', label: 'MIX', min: 0, max: 1, step: 0.05, default: 1 }
-    ],
-    build(values){
-      return {
-        lowColor: hexToRGB(values.lowColor || '#000000'),
-        highColor: hexToRGB(values.highColor || '#ffffff'),
-        mix: clamp01(values.mix)
-      };
-    }
-  },
-  {
-    name: 'tint',
-    label: 'TINT',
-    shortcut: 'T',
-    params: [
-      { key: 'color', type: 'color', label: 'COLORE', default: '#ff7800' },
-      { key: 'opacity', type: 'range', label: 'OPACITÀ', min: 0, max: 1, step: 0.05, default: 0.35 },
-      { key: 'mode', type: 'select', label: 'MODALITÀ', default: 'overlay', options: [
-        { value: 'overlay', label: 'OVERLAY' },
-        { value: 'multiply', label: 'MULTIPLY' },
-        { value: 'screen', label: 'SCREEN' }
-      ] }
-    ],
-    build(values){
-      return {
-        color: hexToRGB(values.color || '#ff7800'),
-        opacity: clamp01(values.opacity),
-        mode: values.mode || 'overlay'
-      };
-    }
-  },
-  {
-    name: 'vignette',
-    label: 'VIGNETTE',
-    shortcut: 'V',
-    params: [
-      { key: 'strength', type: 'range', label: 'FORZA', min: 0, max: 1, step: 0.05, default: 0.5 },
-      { key: 'radius', type: 'range', label: 'RAGGIO', min: 0.1, max: 1, step: 0.05, default: 0.75 },
-      { key: 'centerX', type: 'range', label: 'CENTRO X', min: 0, max: 1, step: 0.05, default: 0.5 },
-      { key: 'centerY', type: 'range', label: 'CENTRO Y', min: 0, max: 1, step: 0.05, default: 0.5 }
-    ],
-    build(values){
-      return {
-        strength: clamp01(values.strength),
-        radius: clampFloat(values.radius, 0.1, 1),
-        centerX: clamp01(values.centerX),
-        centerY: clamp01(values.centerY)
-      };
-    }
-  },
-  {
-    name: 'noise',
-    label: 'NOISE',
-    shortcut: 'N',
-    params: [
-      { key: 'intensity', type: 'range', label: 'INTENSITÀ', min: 0, max: 1, step: 0.05, default: 0.1 },
-      { key: 'mono', type: 'checkbox', label: 'MONO', default: false },
-      { key: 'seed', type: 'number', label: 'SEED', min: 0, max: 9999, step: 1, default: 1337 }
-    ],
-    build(values){
-      return {
-        intensity: clamp01(values.intensity),
-        mono: Boolean(values.mono),
-        seed: clampIntValue(values.seed, 0, 9999)
-      };
-    }
-  },
-  {
-    name: 'scanlines',
-    label: 'SCANLINES',
-    shortcut: 'S',
-    params: [
-      { key: 'thickness', type: 'range', label: 'SPESSORE', min: 1, max: 12, step: 1, default: 2 },
-      { key: 'strength', type: 'range', label: 'FORZA', min: 0, max: 1, step: 0.05, default: 0.4 },
-      { key: 'mode', type: 'select', label: 'MODALITÀ', default: 'mono', options: [
-        { value: 'mono', label: 'MONO' },
-        { value: 'rgb', label: 'RGB' }
-      ] }
-    ],
-    build(values){
-      return {
-        thickness: clampIntValue(values.thickness, 1, 20),
-        strength: clamp01(values.strength),
-        mode: values.mode === 'rgb' ? 'rgb' : 'mono'
-      };
-    }
-  },
-  {
-    name: 'textureOverlay',
-    label: 'TEXTURE',
-    shortcut: 'X',
-    params: [
-      { key: 'opacity', type: 'range', label: 'OPACITÀ', min: 0, max: 1, step: 0.05, default: 0.5 },
-      { key: 'mode', type: 'select', label: 'BLEND', default: 'overlay', options: [
-        { value: 'overlay', label: 'OVERLAY' },
-        { value: 'multiply', label: 'MULTIPLY' },
-        { value: 'screen', label: 'SCREEN' }
-      ] },
-      { key: 'texture', type: 'texture', label: 'TEXTURE', default: null }
-    ],
-    build(values){
-      return {
-        opacity: clamp01(values.opacity),
-        mode: values.mode || 'overlay',
-        texture: values.texture || null
-      };
-    }
-  },
-  {
-    name: 'rgbSplit',
-    label: 'RGB SPLIT',
-    shortcut: 'R',
-    params: [
-      { key: 'offsetRx', type: 'range', label: 'R X', min: -40, max: 40, step: 1, default: 3 },
-      { key: 'offsetRy', type: 'range', label: 'R Y', min: -40, max: 40, step: 1, default: 0 },
-      { key: 'offsetGx', type: 'range', label: 'G X', min: -40, max: 40, step: 1, default: 0 },
-      { key: 'offsetGy', type: 'range', label: 'G Y', min: -40, max: 40, step: 1, default: 0 },
-      { key: 'offsetBx', type: 'range', label: 'B X', min: -40, max: 40, step: 1, default: -3 },
-      { key: 'offsetBy', type: 'range', label: 'B Y', min: -40, max: 40, step: 1, default: 0 },
-      { key: 'feather', type: 'range', label: 'FEATHER', min: 0, max: 1, step: 0.05, default: 0.35 }
-    ],
-    build(values){
-      return {
-        offsetR: { x: clampFloat(values.offsetRx, -40, 40), y: clampFloat(values.offsetRy, -40, 40) },
-        offsetG: { x: clampFloat(values.offsetGx, -40, 40), y: clampFloat(values.offsetGy, -40, 40) },
-        offsetB: { x: clampFloat(values.offsetBx, -40, 40), y: clampFloat(values.offsetBy, -40, 40) },
-        feather: clamp01(values.feather)
-      };
-    }
-  },
-  {
-    name: 'bloom',
-    label: 'BLOOM',
-    shortcut: 'B',
-    params: [
-      { key: 'threshold', type: 'range', label: 'SOGLIA', min: 0, max: 1, step: 0.05, default: 0.6 },
-      { key: 'radius', type: 'range', label: 'RAGGIO', min: 1, max: 40, step: 1, default: 8 },
-      { key: 'intensity', type: 'range', label: 'INTENSITÀ', min: 0, max: 1, step: 0.05, default: 0.4 }
-    ],
-    build(values){
-      return {
-        threshold: clamp01(values.threshold),
-        radius: clampFloat(values.radius, 1, 80),
-        intensity: clamp01(values.intensity)
-      };
-    }
-  },
-  {
-    name: 'glitch',
-    label: 'GLITCH',
-    shortcut: 'G',
-    params: [
-      { key: 'amount', type: 'range', label: 'AMOUNT', min: 0, max: 1, step: 0.05, default: 0.35 },
-      { key: 'maxShift', type: 'range', label: 'SHIFT', min: 1, max: 80, step: 1, default: 12 },
-      { key: 'seed', type: 'number', label: 'SEED', min: 0, max: 9999, step: 1, default: 7 }
-    ],
-    build(values){
-      return {
-        amount: clamp01(values.amount),
-        maxShift: clampFloat(values.maxShift, 1, 120),
-        seed: clampIntValue(values.seed, 0, 9999)
-      };
-    }
-  },
-  {
-    name: 'wave',
-    label: 'WAVE',
-    shortcut: 'W',
-    params: [
-      { key: 'amp', type: 'range', label: 'AMP', min: -60, max: 60, step: 1, default: 8 },
-      { key: 'freq', type: 'range', label: 'FREQ', min: 0.01, max: 0.2, step: 0.01, default: 0.05 },
-      { key: 'dir', type: 'select', label: 'DIREZIONE', default: 'x', options: [
-        { value: 'x', label: 'ORIZZONTALE' },
-        { value: 'y', label: 'VERTICALE' }
-      ] }
-    ],
-    build(values){
-      return {
-        amp: clampFloat(values.amp, -200, 200),
-        freq: clampFloat(values.freq, 0.001, 1),
-        dir: values.dir === 'y' ? 'y' : 'x'
-      };
-    }
-  }
-];
-
-const postFxState = {};
-const postFxUI = new Map();
-let postFxPreviewNextCanvas = null;
-let postFxPreviewRunning = false;
 
 const THERMAL_PALETTE_KEY = 'thermal_v2';
 const THERMAL_COLOR_STOPS = [
@@ -370,7 +172,8 @@ const state = {
   sourceOffscreen: null,
   videoSource: null,
   previewPlayer: null,
-  customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM)
+  customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM),
+  asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD)
 };
 
 let renderQueued = false;
@@ -387,10 +190,11 @@ function init(){
   bindDropzone();
   bindExportModal();
   bindPlaybackControl();
-  initPostFxPanel();
-  bindPostFxShortcuts();
   if(controls.asciiChars){
     controls.asciiChars.value = state.customASCIIString;
+  }
+  if(controls.asciiWord){
+    controls.asciiWord.value = state.asciiWordString;
   }
   updateAsciiCustomVisibility();
   window.addEventListener('resize', () => {
@@ -496,6 +300,10 @@ function bindControls(){
     controls.asciiChars.addEventListener('input', handleCustomASCIIInput);
     controls.asciiChars.addEventListener('blur', syncCustomASCIIInput);
   }
+  if(controls.asciiWord){
+    controls.asciiWord.addEventListener('input', handleASCIIWordInput);
+    controls.asciiWord.addEventListener('blur', syncASCIIWordInput);
+  }
   const changeIds = ['dither','invert','bg','fg','style','fmt','dpi','lockAR'];
   for(const id of changeIds){
     const el = controls[id];
@@ -525,10 +333,15 @@ function bindControls(){
 }
 
 function updateAsciiCustomVisibility(){
-  const field = $('asciiCustomField');
-  if(!field) return;
+  const customField = $('asciiCustomField');
+  const wordField = $('asciiWordField');
   const mode = controls.dither ? controls.dither.value : 'none';
-  field.hidden = mode !== 'ascii_custom';
+  if(customField){
+    customField.hidden = mode !== 'ascii_custom';
+  }
+  if(wordField){
+    wordField.hidden = mode !== 'ascii_word';
+  }
 }
 
 function handleCustomASCIIInput(){
@@ -548,6 +361,26 @@ function syncCustomASCIIInput(){
   state.customASCIIString = normalized;
   if(controls.asciiChars.value !== normalized){
     controls.asciiChars.value = normalized;
+  }
+}
+
+function handleASCIIWordInput(){
+  if(!controls.asciiWord) return;
+  const raw = controls.asciiWord.value || '';
+  const normalized = normalizeASCIIWordString(raw);
+  const prev = state.asciiWordString;
+  state.asciiWordString = normalized;
+  if(normalized !== prev){
+    fastRender();
+  }
+}
+
+function syncASCIIWordInput(){
+  if(!controls.asciiWord) return;
+  const normalized = normalizeASCIIWordString(controls.asciiWord.value || '');
+  state.asciiWordString = normalized;
+  if(controls.asciiWord.value !== normalized){
+    controls.asciiWord.value = normalized;
   }
 }
 
@@ -878,429 +711,6 @@ function bindPlaybackControl(){
       updatePlaybackButton(true, false);
     }
   });
-}
-
-let postFxRefreshTimer = null;
-
-function initPostFxPanel(){
-  initPostFxState();
-  const container = $('postFxControls');
-  if(!container){
-    return;
-  }
-  container.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  POST_FX_DEFS.forEach((def) => {
-    const entry = postFxState[def.name];
-    const card = buildPostFxCard(def, entry);
-    postFxUI.set(def.name, card);
-    frag.appendChild(card.element);
-  });
-  container.appendChild(frag);
-}
-
-function initPostFxState(){
-  POST_FX_DEFS.forEach((def) => {
-    if(postFxState[def.name]) return;
-    const values = {};
-    def.params.forEach((param) => {
-      values[param.key] = clonePostFxDefault(param.default);
-    });
-    postFxState[def.name] = { enabled: false, values };
-  });
-}
-
-function clonePostFxDefault(value){
-  if(Array.isArray(value)) return value.slice();
-  if(value && typeof value === 'object') return JSON.parse(JSON.stringify(value));
-  return value;
-}
-
-function buildPostFxCard(def, entry){
-  const card = document.createElement('div');
-  card.className = 'postfx-card';
-  const header = document.createElement('div');
-  header.className = 'postfx-header';
-  const title = document.createElement('span');
-  title.className = 'postfx-title';
-  title.textContent = def.label;
-  header.appendChild(title);
-
-  const toggleWrap = document.createElement('div');
-  toggleWrap.className = 'postfx-toggle-wrap';
-  const toggle = document.createElement('input');
-  toggle.type = 'checkbox';
-  toggle.className = 'postfx-toggle';
-  toggle.id = `postfx-${def.name}-toggle`;
-  toggle.checked = Boolean(entry && entry.enabled);
-  const toggleStatus = document.createElement('span');
-  toggleStatus.className = 'postfx-toggle-status';
-  toggleStatus.textContent = toggle.checked ? 'ON' : 'OFF';
-  toggle.addEventListener('change', () => {
-    handlePostFxToggle(def.name, toggle.checked);
-  });
-  toggleWrap.appendChild(toggle);
-  toggleWrap.appendChild(toggleStatus);
-  header.appendChild(toggleWrap);
-
-  const fieldsWrap = document.createElement('div');
-  fieldsWrap.className = 'postfx-fields';
-  const controls = [];
-  def.params.forEach((param) => {
-    const currentValue = entry ? entry.values[param.key] : clonePostFxDefault(param.default);
-    const field = createPostFxField(def, param, currentValue);
-    controls.push(field);
-    fieldsWrap.appendChild(field.element);
-  });
-
-  if(toggle.checked){
-    card.classList.add('is-active');
-  }
-
-  card.appendChild(header);
-  card.appendChild(fieldsWrap);
-
-  return { element: card, toggle, toggleStatus, controls, fieldsWrap, def };
-}
-
-function createPostFxField(def, param, value){
-  const field = document.createElement('div');
-  field.className = 'field postfx-field';
-  const label = document.createElement('label');
-  label.textContent = param.label || param.key.toUpperCase();
-  field.appendChild(label);
-  let setValue = () => {};
-  if(param.type === 'range'){
-    const sliderWrap = document.createElement('div');
-    sliderWrap.className = 'slider';
-    const range = document.createElement('input');
-    range.type = 'range';
-    range.min = param.min != null ? String(param.min) : '0';
-    range.max = param.max != null ? String(param.max) : '1';
-    range.step = param.step != null ? String(param.step) : '0.01';
-    range.value = value != null ? String(value) : String(param.default || 0);
-    const number = document.createElement('input');
-    number.type = 'number';
-    number.className = 'num';
-    if(param.min != null) number.min = String(param.min);
-    if(param.max != null) number.max = String(param.max);
-    number.step = param.step != null ? String(param.step) : '0.01';
-    number.value = range.value;
-    const commit = (raw) => {
-      const parsed = Number(raw);
-      const safe = Number.isFinite(parsed) ? parsed : Number(range.value);
-      range.value = String(safe);
-      number.value = String(safe);
-      handlePostFxParamChange(def, param, safe);
-    };
-    range.addEventListener('input', () => {
-      number.value = range.value;
-      handlePostFxParamChange(def, param, Number(range.value));
-    });
-    range.addEventListener('change', () => commit(range.value));
-    number.addEventListener('change', () => commit(number.value));
-    sliderWrap.appendChild(range);
-    sliderWrap.appendChild(number);
-    field.appendChild(sliderWrap);
-    setValue = (val) => {
-      range.value = String(val);
-      number.value = String(val);
-    };
-  }else if(param.type === 'number'){
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.value = value != null ? String(value) : String(param.default || 0);
-    if(param.min != null) input.min = String(param.min);
-    if(param.max != null) input.max = String(param.max);
-    if(param.step != null) input.step = String(param.step);
-    input.addEventListener('change', () => {
-      const parsed = Number(input.value);
-      const safe = Number.isFinite(parsed) ? parsed : Number(param.default || 0);
-      input.value = String(safe);
-      handlePostFxParamChange(def, param, safe);
-    });
-    field.appendChild(input);
-    setValue = (val) => {
-      input.value = String(val);
-    };
-  }else if(param.type === 'color'){
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = typeof value === 'string' ? value : (param.default || '#000000');
-    input.addEventListener('change', () => {
-      handlePostFxParamChange(def, param, input.value || param.default);
-    });
-    field.appendChild(input);
-    setValue = (val) => {
-      input.value = val;
-    };
-  }else if(param.type === 'select'){
-    const select = document.createElement('select');
-    (param.options || []).forEach((opt) => {
-      const option = document.createElement('option');
-      option.value = opt.value;
-      option.textContent = opt.label || opt.value;
-      select.appendChild(option);
-    });
-    select.value = value != null ? String(value) : String(param.default || '');
-    select.addEventListener('change', () => {
-      handlePostFxParamChange(def, param, select.value);
-    });
-    field.appendChild(select);
-    setValue = (val) => {
-      select.value = String(val);
-    };
-  }else if(param.type === 'checkbox'){
-    const wrapper = document.createElement('div');
-    wrapper.className = 'postfx-checkbox';
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = Boolean(value);
-    input.addEventListener('change', () => {
-      handlePostFxParamChange(def, param, input.checked);
-    });
-    wrapper.appendChild(input);
-    field.appendChild(wrapper);
-    setValue = (val) => {
-      input.checked = Boolean(val);
-    };
-  }else if(param.type === 'texture'){
-    field.classList.add('postfx-field--texture');
-    const status = document.createElement('div');
-    status.className = 'postfx-texture-status';
-    status.textContent = value && value.name ? value.name : 'Nessuna texture';
-    const controlsRow = document.createElement('div');
-    controlsRow.className = 'postfx-texture-actions';
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = 'image/*';
-    fileInput.hidden = true;
-    const loadBtn = document.createElement('button');
-    loadBtn.type = 'button';
-    loadBtn.textContent = 'CARICA';
-    loadBtn.addEventListener('click', () => fileInput.click());
-    const clearBtn = document.createElement('button');
-    clearBtn.type = 'button';
-    clearBtn.textContent = 'RIMUOVI';
-    clearBtn.addEventListener('click', () => {
-      handlePostFxParamChange(def, param, null);
-      status.textContent = 'Nessuna texture';
-    });
-    fileInput.addEventListener('change', async () => {
-      if(!fileInput.files || !fileInput.files[0]) return;
-      const file = fileInput.files[0];
-      const texture = await loadTextureBitmap(file);
-      if(texture){
-        texture.name = file.name;
-        status.textContent = file.name;
-        handlePostFxParamChange(def, param, texture);
-      }
-    });
-    controlsRow.appendChild(loadBtn);
-    controlsRow.appendChild(clearBtn);
-    field.appendChild(status);
-    field.appendChild(controlsRow);
-    field.appendChild(fileInput);
-    setValue = (val) => {
-      if(val && val.name){
-        status.textContent = val.name;
-      }else{
-        status.textContent = 'Nessuna texture';
-      }
-    };
-  }
-  return { element: field, setValue };
-}
-
-async function loadTextureBitmap(file){
-  let bitmap = null;
-  try{
-    if(typeof createImageBitmap === 'function'){
-      bitmap = await createImageBitmap(file);
-      const target = downscaleBitmap(bitmap, MAX_TEXTURE_SIZE);
-      const ctx = target.getContext('2d', {willReadFrequently: true});
-      if(!ctx){
-        if(bitmap && typeof bitmap.close === 'function') bitmap.close();
-        return null;
-      }
-      ctx.drawImage(bitmap, 0, 0, target.width, target.height);
-      const data = ctx.getImageData(0, 0, target.width, target.height);
-      if(bitmap && typeof bitmap.close === 'function'){
-        bitmap.close();
-      }
-      return { width: data.width, height: data.height, data: new Uint8ClampedArray(data.data), name: file.name };
-    }
-    const img = await loadImageFromFile(file);
-    const target = downscaleBitmap(img, MAX_TEXTURE_SIZE);
-    const ctx = target.getContext('2d', {willReadFrequently: true});
-    if(!ctx){
-      return null;
-    }
-    ctx.drawImage(img, 0, 0, target.width, target.height);
-    const data = ctx.getImageData(0, 0, target.width, target.height);
-    return { width: data.width, height: data.height, data: new Uint8ClampedArray(data.data), name: file.name };
-  }catch(err){
-    console.error('Texture load failed', err);
-    if(bitmap && typeof bitmap.close === 'function'){
-      bitmap.close();
-    }
-    return null;
-  }
-}
-
-function downscaleBitmap(source, maxSize){
-  const width = source.width || source.naturalWidth || 0;
-  const height = source.height || source.naturalHeight || 0;
-  const canvas = document.createElement('canvas');
-  if(width <= maxSize && height <= maxSize){
-    canvas.width = width;
-    canvas.height = height;
-    return canvas;
-  }
-  const scale = maxSize / Math.max(width, height);
-  canvas.width = Math.max(1, Math.round(width * scale));
-  canvas.height = Math.max(1, Math.round(height * scale));
-  return canvas;
-}
-
-function loadImageFromFile(file){
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = (event) => {
-      URL.revokeObjectURL(url);
-      reject(event instanceof ErrorEvent ? event.error : new Error('Texture image load failed'));
-    };
-    img.src = url;
-  });
-}
-
-function handlePostFxToggle(name, enabled){
-  const entry = postFxState[name];
-  if(!entry) return;
-  entry.enabled = enabled;
-  const ui = postFxUI.get(name);
-  if(ui){
-    ui.toggle.checked = enabled;
-    if(ui.toggleStatus){
-      ui.toggleStatus.textContent = enabled ? 'ON' : 'OFF';
-    }
-    ui.element.classList.toggle('is-active', enabled);
-  }
-  if(enabled){
-    ensureEffect(name).catch((err) => console.error('Effetto non caricato', err));
-  }
-  schedulePostFxRefresh(true);
-}
-
-function handlePostFxParamChange(def, param, value){
-  const entry = postFxState[def.name];
-  if(!entry) return;
-  entry.values[param.key] = value;
-  if(entry.enabled){
-    schedulePostFxRefresh(false);
-  }
-}
-
-function schedulePostFxRefresh(immediate){
-  if(immediate){
-    if(postFxRefreshTimer){
-      clearTimeout(postFxRefreshTimer);
-      postFxRefreshTimer = null;
-    }
-    refreshPostFxPreview();
-    return;
-  }
-  if(postFxRefreshTimer){
-    clearTimeout(postFxRefreshTimer);
-  }
-  postFxRefreshTimer = setTimeout(() => {
-    postFxRefreshTimer = null;
-    refreshPostFxPreview();
-  }, 90);
-}
-
-function refreshPostFxPreview(){
-  if(!state.lastPreview){
-    return;
-  }
-  renderPreview(state.lastPreview, state.lastScale);
-  updateMeta(state.lastSize.width, state.lastSize.height);
-}
-
-function collectActivePostFxEffects(){
-  const active = [];
-  for(const def of POST_FX_DEFS){
-    const entry = postFxState[def.name];
-    if(!entry || !entry.enabled) continue;
-    const params = def.build ? def.build(entry.values) : {...entry.values};
-    if(def.name === 'textureOverlay' && (!params.texture || !params.texture.data)){
-      continue;
-    }
-    active.push({ name: def.name, params });
-  }
-  return active;
-}
-
-function bindPostFxShortcuts(){
-  document.addEventListener('keydown', (event) => {
-    if(event.defaultPrevented) return;
-    const target = event.target;
-    if(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)){
-      return;
-    }
-    const key = event.key && event.key.toUpperCase();
-    if(!key) return;
-    const def = POST_FX_DEFS.find((fx) => fx.shortcut && fx.shortcut.toUpperCase() === key);
-    if(!def) return;
-    event.preventDefault();
-    const entry = postFxState[def.name];
-    if(!entry) return;
-    handlePostFxToggle(def.name, !entry.enabled);
-  });
-}
-
-function queuePostFxPreview(canvas){
-  if(!canvas) return;
-  if(!collectActivePostFxEffects().length){
-    return;
-  }
-  postFxPreviewNextCanvas = canvas;
-  if(postFxPreviewRunning){
-    return;
-  }
-  postFxPreviewRunning = true;
-  const process = async () => {
-    while(postFxPreviewNextCanvas){
-      const target = postFxPreviewNextCanvas;
-      postFxPreviewNextCanvas = null;
-      const effects = collectActivePostFxEffects();
-      if(!effects.length){
-        break;
-      }
-      try{
-        await applyToCanvas(target, effects, { preview: true, maxDimension: 1024 });
-      }catch(err){
-        console.error('Post-FX preview error', err);
-      }
-    }
-    postFxPreviewRunning = false;
-  };
-  process();
-}
-
-async function applyPostFxForExport(canvas){
-  const effects = collectActivePostFxEffects();
-  if(!effects.length) return;
-  try{
-    await applyToCanvas(canvas, effects, { preview: false });
-  }catch(err){
-    console.error('Post-FX export error', err);
-  }
 }
 
 function beginUpload(name=''){
@@ -1843,6 +1253,18 @@ function normalizeCustomASCIIString(input){
   return chars.join('');
 }
 
+function normalizeASCIIWordString(input){
+  let value = typeof input === 'string' ? input : '';
+  value = value.replace(/\s+/g, '');
+  if(!value){
+    value = DEFAULT_ASCII_WORD;
+  }
+  if(value.length > ASCII_WORD_MAX){
+    value = value.slice(0, ASCII_WORD_MAX);
+  }
+  return value.toUpperCase();
+}
+
 function collectRenderOptions(){
   const px = clampInt(controls.pixelSize.value||10, 2, 200);
   const thr = clampInt(controls.threshold.value||180, 0, 255);
@@ -1863,7 +1285,8 @@ function collectRenderOptions(){
   const scaleVal = parseFloat(controls.scale.value||'1');
   const scale = Number.isFinite(scaleVal) && scaleVal>0 ? scaleVal : 1;
   const asciiCustom = state.customASCIIString;
-  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom};
+  const asciiWord = state.asciiWordString;
+  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom, asciiWord};
 }
 
 function buildWorkerOptions(options){
@@ -1881,7 +1304,8 @@ function buildWorkerOptions(options){
     thickness: options.thick,
     dither: options.mode,
     invertMode: options.invertMode,
-    asciiCustom: options.asciiCustom
+    asciiCustom: options.asciiCustom,
+    asciiWord: options.asciiWord
   };
 }
 
@@ -2014,6 +1438,14 @@ function getASCIICharset(key, customString){
     const normalized = normalizeCustomASCIIString(typeof customString === 'string' ? customString : state.customASCIIString);
     return Array.from(normalized);
   }
+  if(key === 'ascii_word'){
+    const normalized = normalizeASCIIWordString(
+      typeof customString === 'string' && customString.length
+        ? customString
+        : state.asciiWordString
+    );
+    return Array.from(` ${normalized}`);
+  }
   return ASCII_CHARSETS[key] || ASCII_CHARSETS.ascii_simple;
 }
 
@@ -2126,7 +1558,9 @@ function createFrameData(result, options){
     const asciiArray = ensureASCIIArray(result.ascii);
     const charsetString = typeof result.charsetString === 'string'
       ? result.charsetString
-      : (charsetKey === 'ascii_custom' ? options.asciiCustom : '');
+      : (charsetKey === 'ascii_custom'
+        ? options.asciiCustom
+        : (charsetKey === 'ascii_word' ? options.asciiWord : ''));
     const effectiveCharset = getASCIICharset(charsetKey, charsetString);
     const lines = result.lines && result.lines.length
       ? result.lines
@@ -2134,9 +1568,16 @@ function createFrameData(result, options){
     const effectiveTile = Math.max(tile, ASCII_MIN_TILE);
     const finalWidth = adjusted.width;
     const finalHeight = adjusted.height;
-    const normalizedCharsetString = charsetKey === 'ascii_custom'
-      ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
-      : effectiveCharset.join('');
+    let normalizedCharsetString;
+    if(charsetKey === 'ascii_custom'){
+      normalizedCharsetString = normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString);
+    }else if(charsetKey === 'ascii_word'){
+      const word = normalizeASCIIWordString(charsetString || options.asciiWord || state.asciiWordString);
+      normalizedCharsetString = ` ${word}`;
+    }else{
+      normalizedCharsetString = effectiveCharset.join('');
+    }
+    const colorArray = result.colors ? ensureUint8Array(result.colors) : null;
     return {
       kind: 'ascii',
       gridWidth: result.gridWidth,
@@ -2146,6 +1587,7 @@ function createFrameData(result, options){
       lines,
       charsetKey,
       charsetString: normalizedCharsetString,
+      colors: colorArray,
       outputWidth: finalWidth,
       outputHeight: finalHeight,
       aspectWidth,
@@ -2208,6 +1650,7 @@ function buildPreviewData(frame, options){
       lines: frame.lines,
       charsetKey: frame.charsetKey,
       charsetString: frame.charsetString,
+      colors: frame.colors,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -2358,10 +1801,20 @@ function buildAsciiSVGString(frame, options){
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
-  const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight);
+  const colorArray = frame.colors ? ensureUint8Array(frame.colors) : null;
+  const asciiElements = asciiLinesToSVGElements(lines, cellWidth, cellHeight, {
+    colors: colorArray,
+    gridWidth: frame.gridWidth,
+    mode: frame.mode || options.mode || 'ascii_simple'
+  });
+  const usesPerGlyphFill = asciiElements.usesPerGlyphFill;
+  const textMarkup = asciiElements.textMarkup;
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
   if(options.bg && options.bg !== 'transparent'){
     svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
+  }
+  if(asciiElements.backgroundMarkup){
+    svg += asciiElements.backgroundMarkup;
   }
   if(!textMarkup){
     svg += '</svg>';
@@ -2370,7 +1823,7 @@ function buildAsciiSVGString(frame, options){
   const fontSize = Math.max(2, Math.min(cellWidth, cellHeight) * 0.92);
   const fgColor = options.fg || '#000000';
   const glowAmount = Math.max(0, options.glow || 0);
-  if(glowAmount > 0){
+  if(glowAmount > 0 && !usesPerGlyphFill){
     const fgRGB = hexToRGB(fgColor);
     const glowRGB = lightenColor(fgRGB, 0.4);
     const blurRadius = Math.max(0.2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.4 + glowAmount/90));
@@ -2378,34 +1831,133 @@ function buildAsciiSVGString(frame, options){
     svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
     svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
   }
-  svg += `<g fill="${fgColor}" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  const groupAttrs = `font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0"`;
+  if(usesPerGlyphFill){
+    svg += `<g ${groupAttrs}>${textMarkup}</g>`;
+  }else{
+    svg += `<g fill="${fgColor}" ${groupAttrs}>${textMarkup}</g>`;
+  }
   svg += '</svg>';
   return svg;
 }
 
-function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
+function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
   if(!lines || !lines.length){
-    return '';
+    return {textMarkup: '', backgroundMarkup: '', usesPerGlyphFill: false};
   }
+  const gridWidth = Math.max(0, options.gridWidth || (lines[0] ? lines[0].length : 0));
+  const colorArray = options.colors && gridWidth
+    ? ensureUint8Array(options.colors)
+    : null;
+  const totalCells = gridWidth * lines.length;
+  const hasColors = colorArray && colorArray.length >= totalCells * 3;
+  const mode = options.mode || 'ascii_simple';
+  const asciiPixel = mode === 'ascii_pixel';
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
   const stepX = cellWidth;
   const stepY = cellHeight;
-  let markup = '';
+  const textColorCache = hasColors && !asciiPixel ? new Map() : null;
+  const asciiPixelCache = asciiPixel && hasColors ? new Map() : null;
+  const asciiPixelThreshold = options.asciiPixelThreshold != null ? options.asciiPixelThreshold : 150;
+  const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
+  const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
+  let textMarkup = '';
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
     const baseY = offsetY + y*stepY;
-    for(let x=0;x<line.length;x++){
+    for(let x=0;x<gridWidth;x++){
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
       }
       const baseX = offsetX + x*stepX;
-      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle">${escapeXML(ch)}</text>`;
+      let fillAttr = '';
+      if(asciiPixel && hasColors){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colorArray[idx];
+        const g = colorArray[idx+1];
+        const b = colorArray[idx+2];
+        const luminance = 0.2126*r + 0.7152*g + 0.0722*b;
+        const bucket = luminance >= asciiPixelThreshold ? 1 : 0;
+        let fill = asciiPixelCache.get(bucket);
+        if(!fill){
+          fill = bucket ? asciiPixelDark : asciiPixelLight;
+          asciiPixelCache.set(bucket, fill);
+        }
+        fillAttr = ` fill="${fill}"`;
+      }else if(hasColors){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colorArray[idx];
+        const g = colorArray[idx+1];
+        const b = colorArray[idx+2];
+        const key = (r << 16) | (g << 8) | b;
+        let fill = textColorCache.get(key);
+        if(!fill){
+          fill = `rgb(${r},${g},${b})`;
+          textColorCache.set(key, fill);
+        }
+        fillAttr = ` fill="${fill}"`;
+      }
+      textMarkup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
     }
   }
-  return markup;
+  let backgroundMarkup = '';
+  if(asciiPixel && hasColors && gridWidth > 0){
+    const pathMap = new Map();
+    const buildEntry = (colorKey) => {
+      let entry = pathMap.get(colorKey);
+      if(!entry){
+        entry = {
+          path: '',
+          r: (colorKey >> 16) & 0xFF,
+          g: (colorKey >> 8) & 0xFF,
+          b: colorKey & 0xFF
+        };
+        pathMap.set(colorKey, entry);
+      }
+      return entry;
+    };
+    for(let y=0;y<lines.length;y++){
+      let runColor = -1;
+      let runStart = 0;
+      const flushRun = (colorKey, start, end) => {
+        if(colorKey === -1) return;
+        const length = end - start;
+        if(length <= 0) return;
+        const entry = buildEntry(colorKey);
+        const rectWidth = length * stepX;
+        const rectHeight = stepY;
+        const rectX = start * stepX;
+        const rectY = y * stepY;
+        entry.path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(rectHeight)}h-${formatNumber(rectWidth)}z`;
+      };
+      for(let x=0;x<=gridWidth;x++){
+        let colorKey = -1;
+        if(x < gridWidth){
+          const idx = (y*gridWidth + x) * 3;
+          const r = colorArray[idx];
+          const g = colorArray[idx+1];
+          const b = colorArray[idx+2];
+          colorKey = (r << 16) | (g << 8) | b;
+        }
+        if(colorKey !== runColor){
+          flushRun(runColor, runStart, x);
+          runColor = colorKey;
+          runStart = x;
+        }
+      }
+    }
+    pathMap.forEach((entry) => {
+      backgroundMarkup += `<path fill="rgb(${entry.r},${entry.g},${entry.b})" d="${entry.path}"/>`;
+    });
+  }
+  return {
+    textMarkup,
+    backgroundMarkup,
+    usesPerGlyphFill: asciiPixel || hasColors
+  };
 }
 
 function buildExportSVG(result, options){
@@ -2540,7 +2092,6 @@ function drawAnimationFrame(player, index){
     glow: player.data.glow
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
-  queuePostFxPreview(player.canvas);
 }
 
 function renderPreview(previewData, scale){
@@ -2734,8 +2285,12 @@ function paintAscii(ctx, data, outWidth, outHeight){
   ctx.imageSmoothingEnabled = false;
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
+  const colorArray = data.colors ? ensureUint8Array(data.colors) : null;
+  const hasColors = colorArray && colorArray.length >= gridWidth*gridHeight*3;
+  const mode = data.mode || data.kind || 'ascii_simple';
+  const isAsciiPixel = mode === 'ascii_pixel';
   const glowAmount = Math.max(0, data.glow || 0);
-  if(glowAmount > 0){
+  if(glowAmount > 0 && (!hasColors || !isAsciiPixel)){
     const fgRGB = hexToRGB(data.fg || '#000000');
     const glowRGB = lightenColor(fgRGB, 0.4);
     ctx.save();
@@ -2745,12 +2300,58 @@ function paintAscii(ctx, data, outWidth, outHeight){
     drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
     ctx.restore();
   }
-  ctx.fillStyle = data.fg || '#000000';
-  drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
+  if(isAsciiPixel && hasColors){
+    const backgroundCache = new Map();
+    for(let y=0;y<gridHeight;y++){
+      const rowOffset = y*gridWidth;
+      const drawY = y * cellHeight;
+      for(let x=0;x<gridWidth;x++){
+        const idx = (rowOffset + x) * 3;
+        const r = colorArray[idx];
+        const g = colorArray[idx+1];
+        const b = colorArray[idx+2];
+        const key = (r << 16) | (g << 8) | b;
+        let fill = backgroundCache.get(key);
+        if(!fill){
+          fill = `rgb(${r},${g},${b})`;
+          backgroundCache.set(key, fill);
+        }
+        const drawX = x * cellWidth;
+        ctx.fillStyle = fill;
+        ctx.fillRect(drawX, drawY, cellWidth, cellHeight);
+      }
+    }
+    const asciiPixelCache = new Map();
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, {
+      colors: colorArray,
+      asciiPixel: true,
+      asciiPixelCache,
+      asciiPixelLight: data.asciiPixelLight || 'rgba(248,248,248,0.95)',
+      asciiPixelDark: data.asciiPixelDark || 'rgba(16,16,16,0.88)'
+    });
+  }else if(hasColors){
+    const colorCache = new Map();
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, {
+      colors: colorArray,
+      colorCache
+    });
+  }else{
+    ctx.fillStyle = data.fg || '#000000';
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
+  }
   ctx.restore();
 }
 
-function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight){
+function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, options = {}){
+  const colors = options.colors;
+  const totalCells = gridWidth * lines.length;
+  const hasColors = colors && colors.length >= totalCells * 3;
+  const asciiPixel = Boolean(options.asciiPixel && hasColors);
+  const colorCache = hasColors && !asciiPixel ? (options.colorCache || new Map()) : null;
+  const asciiPixelCache = asciiPixel ? (options.asciiPixelCache || new Map()) : null;
+  const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
+  const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
+  const asciiPixelThreshold = options.asciiPixelThreshold != null ? options.asciiPixelThreshold : 150;
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
@@ -2759,6 +2360,32 @@ function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cell
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
+      }
+      if(asciiPixel){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colors[idx];
+        const g = colors[idx+1];
+        const b = colors[idx+2];
+        const luminance = 0.2126*r + 0.7152*g + 0.0722*b;
+        const bucket = luminance >= asciiPixelThreshold ? 1 : 0;
+        let fill = asciiPixelCache.get(bucket);
+        if(!fill){
+          fill = bucket ? asciiPixelDark : asciiPixelLight;
+          asciiPixelCache.set(bucket, fill);
+        }
+        ctx.fillStyle = fill;
+      }else if(hasColors){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colors[idx];
+        const g = colors[idx+1];
+        const b = colors[idx+2];
+        const key = (r << 16) | (g << 8) | b;
+        let fill = colorCache.get(key);
+        if(!fill){
+          fill = `rgb(${r},${g},${b})`;
+          colorCache.set(key, fill);
+        }
+        ctx.fillStyle = fill;
       }
       const posX = Math.round((x*cellWidth + offsetX) * 10) / 10;
       ctx.fillText(ch, posX, posY);
@@ -2827,7 +2454,6 @@ function drawPreviewFrame(canvas, data, width, height, dpr){
     ctx.scale(dpr, dpr);
   }
   paintFrame(ctx, data, width, height);
-  queuePostFxPreview(canvas);
 }
 
 function schedulePreviewRefresh(){
@@ -2991,7 +2617,6 @@ async function downloadRaster(format){
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
   const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
-  await applyPostFxForExport(canvas);
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
@@ -3002,68 +2627,23 @@ async function downloadGIF(){
   const options = collectRenderOptions();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
-  const postFxEffects = collectActivePostFxEffects();
-  if(!postFxEffects.length){
-    const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
-    if(!indexedFrames.length){
-      throw new Error('Nessun frame disponibile per la GIF');
-    }
-    const referencePalette = indexedFrames[0].palette;
-    const transparentIndex = indexedFrames[0].transparentIndex;
-    for(let i=1;i<indexedFrames.length;i++){
-      if(!palettesMatch(referencePalette, indexedFrames[i].palette)){
-        throw new Error('Palette incoerenti tra i frame GIF');
-      }
-    }
-    const gifBytes = encodeIndexedGif(
-      indexedFrames.map((f) => f.indexes),
-      dims.width,
-      dims.height,
-      exportData.durations,
-      referencePalette,
-      transparentIndex
-    );
-    const blob = new Blob([gifBytes], {type:'image/gif'});
-    triggerDownload(blob, 'bitmap.gif');
-    return;
+  const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
+  if(!indexedFrames.length){
+    throw new Error('Nessun frame disponibile per la GIF');
   }
-
-  const frameImages = [];
-  const colorSamples = [];
-  let hasTransparency = options.bg === 'transparent';
-  const durations = exportData.durations;
-  for(let i=0;i<exportData.frames.length;i++){
-    const canvas = createExportCanvas(dims.width, dims.height);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if(!ctx){
-      throw new Error('Impossibile elaborare il frame GIF');
+  const referencePalette = indexedFrames[0].palette;
+  const transparentIndex = indexedFrames[0].transparentIndex;
+  for(let i=1;i<indexedFrames.length;i++){
+    if(!palettesMatch(referencePalette, indexedFrames[i].palette)){
+      throw new Error('Palette incoerenti tra i frame GIF');
     }
-    ctx.setTransform(1,0,0,1,0,0);
-    ctx.clearRect(0, 0, dims.width, dims.height);
-    const frame = exportData.frames[i];
-    const frameData = {
-      ...frame,
-      type: frame.kind,
-      bg: options.bg,
-      fg: options.fg,
-      glow: options.glow
-    };
-    paintFrame(ctx, frameData, dims.width, dims.height);
-    await applyToCanvas(canvas, postFxEffects, { preview: false });
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    frameImages.push(imageData);
-    hasTransparency = collectGifColorSamples(imageData, colorSamples, hasTransparency);
   }
-  const paletteInfo = buildGifPalette(colorSamples, hasTransparency);
-  const palette = paletteInfo.palette;
-  const transparentIndex = paletteInfo.transparentIndex;
-  const indexedFrames = frameImages.map((imageData) => imageDataToPaletteIndexes(imageData, palette, transparentIndex));
   const gifBytes = encodeIndexedGif(
-    indexedFrames,
+    indexedFrames.map((f) => f.indexes),
     dims.width,
     dims.height,
-    durations,
-    palette,
+    exportData.durations,
+    referencePalette,
     transparentIndex
   );
   const blob = new Blob([gifBytes], {type:'image/gif'});
@@ -3080,7 +2660,6 @@ async function downloadMP4(){
     throw new Error('Nessun formato MP4/WebM supportato per la registrazione');
   }
   const options = collectRenderOptions();
-  const postFxEffects = collectActivePostFxEffects();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
   const canvas = createExportCanvas(dims.width, dims.height, {forceDOM: true});
@@ -3111,9 +2690,6 @@ async function downloadMP4(){
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, dims.width, dims.height);
     paintFrame(ctx, frameData, dims.width, dims.height);
-    if(postFxEffects.length){
-      await applyToCanvas(canvas, postFxEffects, { preview: false });
-    }
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
   }
@@ -3223,19 +2799,25 @@ function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight, til
   return output;
 }
 
-function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
+function renderAsciiFrameImageData(frame, outWidth, outHeight, options, overrides={}){
   const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
   const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
   const canvas = createExportCanvas(width, height, {forceDOM: true});
   const ctx = canvas.getContext('2d', {alpha: true});
-  if(!ctx) return new Uint8Array(width*height);
+  if(!ctx) return null;
+  const charsetKey = frame.charsetKey || (options && options.mode) || 'ascii_simple';
+  const charsetSource = typeof frame.charsetString === 'string'
+    ? frame.charsetString
+    : (charsetKey === 'ascii_custom'
+      ? (options && options.asciiCustom)
+      : (charsetKey === 'ascii_word' ? (options && options.asciiWord) : ''));
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(
       frame.ascii,
       frame.gridWidth,
       frame.gridHeight,
-      getASCIICharset(frame.charsetKey || (options && options.mode), frame.charsetString || (options && options.asciiCustom))
+      getASCIICharset(charsetKey, charsetSource)
     );
   paintAscii(ctx, {
     type: 'ascii',
@@ -3243,14 +2825,26 @@ function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
     gridWidth: frame.gridWidth,
     gridHeight: frame.gridHeight,
     tile: frame.tile,
-    bg: 'transparent',
-    fg: '#ffffff',
-    glow: 0
+    mode: frame.mode || charsetKey,
+    bg: overrides.bg != null ? overrides.bg : (options && options.bg != null ? options.bg : 'transparent'),
+    fg: overrides.fg != null ? overrides.fg : (options && options.fg != null ? options.fg : '#ffffff'),
+    glow: overrides.glow != null ? overrides.glow : 0,
+    colors: frame.colors
   }, width, height);
-  const imageData = ctx.getImageData(0, 0, width, height).data;
+  return ctx.getImageData(0, 0, width, height);
+}
+
+function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
+  const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, {bg: 'transparent', fg: '#ffffff', glow: 0});
+  if(!imageData){
+    const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
+    const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
+    return new Uint8Array(width*height);
+  }
+  const { data, width, height } = imageData;
   const binary = new Uint8Array(width*height);
-  for(let i=0, p=0;i<imageData.length;i+=4,p++){
-    binary[p] = imageData[i+3] > 32 ? 1 : 0;
+  for(let i=0, p=0;i<data.length;i+=4,p++){
+    binary[p] = data[i+3] > 32 ? 1 : 0;
   }
   return binary;
 }
@@ -3277,9 +2871,32 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
     return {indexes, palette, transparentIndex: -1, paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined)};
   }
   if(frame.kind === 'ascii'){
-    const indexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
+    const hasColors = frame.colors && frame.colors.length;
+    const asciiOverrides = hasColors
+      ? { bg: options.bg != null ? options.bg : 'transparent', fg: options.fg, glow: 0 }
+      : { bg: 'transparent', fg: '#ffffff', glow: 0 };
+    const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, asciiOverrides);
+    if(!imageData){
+      const fallbackIndexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
+      const fallbackPalette = buildBinaryPalette(options.bg, options.fg);
+      return {indexes: fallbackIndexes, palette: fallbackPalette.palette, transparentIndex: fallbackPalette.transparentIndex};
+    }
+    if(hasColors){
+      const samples = [];
+      const hasTrans = collectGifColorSamples(imageData, samples, options.bg === 'transparent');
+      const paletteInfo = buildGifPalette(samples, hasTrans);
+      const palette = paletteInfo.palette;
+      const transparentIndex = paletteInfo.transparentIndex;
+      const indexes = imageDataToPaletteIndexes(imageData, palette, transparentIndex);
+      return {indexes, palette, transparentIndex};
+    }
+    const binary = new Uint8Array(imageData.width * imageData.height);
+    const pixels = imageData.data;
+    for(let i=0, p=0;i<pixels.length;i+=4,p++){
+      binary[p] = pixels[i+3] > 32 ? 1 : 0;
+    }
     const paletteInfo = buildBinaryPalette(options.bg, options.fg);
-    return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+    return {indexes: binary, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
   }
   const indexes = maskToBinaryFrame(
     frame.mask,

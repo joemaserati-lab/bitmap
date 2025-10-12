@@ -10,9 +10,13 @@ let workCtx = null;
 let workWidth = 0;
 let workHeight = 0;
 let baseGray = null;
+let baseSource = null;
 let baseGrid = null;
+let baseColorGrid = null;
 let lastGridWidth = 0;
 let lastGridHeight = 0;
+let lastColorWidth = 0;
+let lastColorHeight = 0;
 
 const THERMAL_PALETTE_KEY = 'thermal_v2';
 const THERMAL_COLOR_STOPS = [
@@ -60,8 +64,10 @@ function buildThermalPalette(stops, steps){
 }
 
 const ASCII_DEFAULT_CUSTOM = ' .:-=+*#%@';
+const ASCII_DEFAULT_WORD = 'PIXEL';
 const ASCII_MIN_TILE = 8;
 const ASCII_CUSTOM_MAX = 64;
+const ASCII_WORD_MAX = 32;
 
 const BAYER4_MATRIX = [
   [0,8,2,10],
@@ -81,8 +87,9 @@ const DIFFUSION_KERNELS = {
 
 const ASCII_SETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
-  ascii_pixel: [' ','░','▒','▓','█'],
-  ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
+  ascii_pixel: [' ','.',':','-','=','+','#','@'],
+  ascii_unicode: [' ','·',':','-','=','+','*','#','%','@'],
+  ascii_word: [' ','P','I','X','E','L']
 };
 
 function normalizeCustomCharset(input){
@@ -100,10 +107,27 @@ function normalizeCustomCharset(input){
   return chars.join('');
 }
 
+function normalizeWordString(input){
+  let value = typeof input === 'string' ? input : '';
+  value = value.replace(/\s+/g, '');
+  if(!value){
+    value = ASCII_DEFAULT_WORD;
+  }
+  if(value.length > ASCII_WORD_MAX){
+    value = value.slice(0, ASCII_WORD_MAX);
+  }
+  return value.toUpperCase();
+}
+
 function resolveCharset(key, customString){
   if(key === 'ascii_custom'){
     const normalized = normalizeCustomCharset(customString);
     return {chars: Array.from(normalized), key: 'ascii_custom', charsetString: normalized};
+  }
+  if(key === 'ascii_word'){
+    const normalizedWord = normalizeWordString(customString);
+    const charsetString = ` ${normalizedWord}`;
+    return {chars: Array.from(charsetString), key: 'ascii_word', charsetString};
   }
   const base = ASCII_SETS[key];
   if(base){
@@ -152,9 +176,13 @@ function handleLoadSource({image, offscreen, width, height, version, key}){
   workWidth = 0;
   workHeight = 0;
   baseGray = null;
+  baseSource = null;
   baseGrid = null;
+  baseColorGrid = null;
   lastGridWidth = 0;
   lastGridHeight = 0;
+  lastColorWidth = 0;
+  lastColorHeight = 0;
   ctx.postMessage({type:'source-loaded', version, key: currentSourceKey});
 }
 
@@ -166,6 +194,7 @@ function handleProcess({jobId, options}){
     if(result.indexes) transfers.push(result.indexes.buffer);
     if(result.palette) transfers.push(result.palette.buffer);
     if(result.ascii) transfers.push(result.ascii.buffer);
+    if(result.colors) transfers.push(result.colors.buffer);
     ctx.postMessage({...result, type:'result', jobId}, transfers);
   }catch(error){
     ctx.postMessage({type:'error', jobId, message: error && error.message ? error.message : String(error)});
@@ -235,10 +264,11 @@ function processImage(options){
   let gridHeight = baseHeight;
   let tile = pixelSize;
 
-  if(dither === 'ascii_simple' || dither === 'ascii_unicode' || dither === 'ascii_custom'){
-    const ascii = asciiDither(tonal, baseWidth, baseHeight, invert, dither, options.asciiCustom);
+  const isAscii = dither === 'ascii_simple' || dither === 'ascii_unicode' || dither === 'ascii_custom' || dither === 'ascii_pixel' || dither === 'ascii_word';
+  if(isAscii){
+    const ascii = asciiDither(tonal, baseWidth, baseHeight, invert, dither, options.asciiCustom, options.asciiWord, options.threshold);
     const asciiTile = Math.max(pixelSize, ASCII_MIN_TILE);
-    return {
+    const payload = {
       kind: 'ascii',
       gridWidth: baseWidth,
       gridHeight: baseHeight,
@@ -252,6 +282,14 @@ function processImage(options){
       aspectWidth: sourceWidth,
       aspectHeight: sourceHeight
     };
+    if(dither === 'ascii_pixel'){
+      const colors = ensureColorGrid(baseWidth, baseHeight);
+      payload.colors = colors ? new Uint8Array(colors) : null;
+    }
+    if(ascii.lines){
+      payload.lines = ascii.lines;
+    }
+    return payload;
   }
 
   if(dither === 'thermal'){
@@ -338,7 +376,10 @@ function refineGridSize(widthGuess, heightGuess, targetWidth, targetHeight, rati
   }
 }
 
-function asciiDither(gray, width, height, invert, key, customString){
+function asciiDither(gray, width, height, invert, key, customString, wordString, threshold){
+  if(key === 'ascii_word'){
+    return asciiWordDither(gray, width, height, invert, wordString, threshold);
+  }
   const charsetInfo = resolveCharset(key, customString);
   const charset = charsetInfo.chars;
   const maxIndex = charset.length > 0 ? charset.length - 1 : 0;
@@ -351,6 +392,37 @@ function asciiDither(gray, width, height, invert, key, customString){
     buffer[i] = idx;
   }
   return {data: buffer, key: charsetInfo.key, charsetString: charsetInfo.charsetString};
+}
+
+function asciiWordDither(gray, width, height, invert, wordInput, threshold){
+  const word = normalizeWordString(wordInput);
+  const letters = word.length ? Array.from(word) : Array.from(ASCII_DEFAULT_WORD);
+  const charsetString = ` ${word}`;
+  const buffer = new Uint8Array(width*height);
+  const lines = new Array(height);
+  const thrValue = Math.max(0, Math.min(255, parseInt(threshold, 10))); // might be NaN
+  const effectiveThreshold = Number.isFinite(thrValue) ? thrValue : 180;
+  const letterCount = letters.length || 1;
+  let pointer = 0;
+  for(let y=0;y<height;y++){
+    const row = new Array(width);
+    const rowOffset = y*width;
+    for(let x=0;x<width;x++){
+      const idx = rowOffset + x;
+      const value = invert ? (255 - gray[idx]) : gray[idx];
+      if(value < effectiveThreshold){
+        const letterIndex = pointer % letterCount;
+        pointer++;
+        buffer[idx] = letterIndex + 1;
+        row[x] = letters[letterIndex];
+      }else{
+        buffer[idx] = 0;
+        row[x] = ' ';
+      }
+    }
+    lines[y] = row.join('');
+  }
+  return {data: buffer, key: 'ascii_word', charsetString, lines};
 }
 
 
@@ -366,14 +438,19 @@ function prepareBaseGray(){
   workHeight = Math.max(1, Math.round(sourceHeight * scale));
   const ctx = ensureWorkContext(workWidth, workHeight);
   ctx.drawImage(sourceCanvas, 0, 0, workWidth, workHeight);
-  const data = ctx.getImageData(0,0,workWidth,workHeight).data;
+  const imageData = ctx.getImageData(0,0,workWidth,workHeight);
+  const data = imageData.data;
+  baseSource = new Uint8ClampedArray(data);
   baseGray = new Float32Array(workWidth*workHeight);
   for(let i=0,j=0;i<data.length;i+=4,j++){
     baseGray[j] = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
   }
   baseGrid = null;
+  baseColorGrid = null;
   lastGridWidth = 0;
   lastGridHeight = 0;
+  lastColorWidth = 0;
+  lastColorHeight = 0;
 }
 
 function ensureGridBase(gridWidth, gridHeight){
@@ -406,6 +483,52 @@ function ensureGridBase(gridWidth, gridHeight){
   lastGridWidth = gridWidth;
   lastGridHeight = gridHeight;
   return baseGrid;
+}
+
+function ensureColorGrid(gridWidth, gridHeight){
+  if(!baseSource) prepareBaseGray();
+  if(baseColorGrid && gridWidth === lastColorWidth && gridHeight === lastColorHeight){
+    return baseColorGrid;
+  }
+  const total = gridWidth * gridHeight;
+  const targetSize = total * 3;
+  if(!baseColorGrid || baseColorGrid.length !== targetSize){
+    baseColorGrid = new Uint8Array(targetSize);
+  }
+  const scaleX = workWidth / gridWidth;
+  const scaleY = workHeight / gridHeight;
+  for(let y=0;y<gridHeight;y++){
+    const srcY = (y + 0.5) * scaleY - 0.5;
+    const y0 = Math.max(0, Math.floor(srcY));
+    const y1 = Math.min(workHeight - 1, y0 + 1);
+    const fy = srcY - y0;
+    for(let x=0;x<gridWidth;x++){
+      const srcX = (x + 0.5) * scaleX - 0.5;
+      const x0 = Math.max(0, Math.floor(srcX));
+      const x1 = Math.min(workWidth - 1, x0 + 1);
+      const fx = srcX - x0;
+      const base00 = ((y0*workWidth) + x0) * 4;
+      const base10 = ((y0*workWidth) + x1) * 4;
+      const base01 = ((y1*workWidth) + x0) * 4;
+      const base11 = ((y1*workWidth) + x1) * 4;
+      const rTop = baseSource[base00] + (baseSource[base10] - baseSource[base00]) * fx;
+      const gTop = baseSource[base00 + 1] + (baseSource[base10 + 1] - baseSource[base00 + 1]) * fx;
+      const bTop = baseSource[base00 + 2] + (baseSource[base10 + 2] - baseSource[base00 + 2]) * fx;
+      const rBottom = baseSource[base01] + (baseSource[base11] - baseSource[base01]) * fx;
+      const gBottom = baseSource[base01 + 1] + (baseSource[base11 + 1] - baseSource[base01 + 1]) * fx;
+      const bBottom = baseSource[base01 + 2] + (baseSource[base11 + 2] - baseSource[base01 + 2]) * fx;
+      const r = Math.round(clamp255(rTop + (rBottom - rTop) * fy));
+      const g = Math.round(clamp255(gTop + (gBottom - gTop) * fy));
+      const b = Math.round(clamp255(bTop + (bBottom - bTop) * fy));
+      const offset = (y*gridWidth + x) * 3;
+      baseColorGrid[offset] = r;
+      baseColorGrid[offset + 1] = g;
+      baseColorGrid[offset + 2] = b;
+    }
+  }
+  lastColorWidth = gridWidth;
+  lastColorHeight = gridHeight;
+  return baseColorGrid;
 }
 
 function lerp(a, b, t){
