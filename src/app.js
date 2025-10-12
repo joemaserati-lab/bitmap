@@ -2362,11 +2362,19 @@ function buildAsciiSVGString(frame, options){
     ? frame.lines
     : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
   const colorArray = frame.colors ? ensureUint8Array(frame.colors) : null;
-  const hasColors = colorArray && colorArray.length >= frame.gridWidth*frame.gridHeight*3;
-  const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight, hasColors ? colorArray : null, frame.gridWidth);
+  const asciiElements = asciiLinesToSVGElements(lines, cellWidth, cellHeight, {
+    colors: colorArray,
+    gridWidth: frame.gridWidth,
+    mode: frame.mode || options.mode || 'ascii_simple'
+  });
+  const usesPerGlyphFill = asciiElements.usesPerGlyphFill;
+  const textMarkup = asciiElements.textMarkup;
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
   if(options.bg && options.bg !== 'transparent'){
     svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
+  }
+  if(asciiElements.backgroundMarkup){
+    svg += asciiElements.backgroundMarkup;
   }
   if(!textMarkup){
     svg += '</svg>';
@@ -2375,7 +2383,7 @@ function buildAsciiSVGString(frame, options){
   const fontSize = Math.max(2, Math.min(cellWidth, cellHeight) * 0.92);
   const fgColor = options.fg || '#000000';
   const glowAmount = Math.max(0, options.glow || 0);
-  if(glowAmount > 0 && !hasColors){
+  if(glowAmount > 0 && !usesPerGlyphFill){
     const fgRGB = hexToRGB(fgColor);
     const glowRGB = lightenColor(fgRGB, 0.4);
     const blurRadius = Math.max(0.2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.4 + glowAmount/90));
@@ -2383,54 +2391,133 @@ function buildAsciiSVGString(frame, options){
     svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
     svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
   }
-  if(hasColors){
-    svg += `<g font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  const groupAttrs = `font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0"`;
+  if(usesPerGlyphFill){
+    svg += `<g ${groupAttrs}>${textMarkup}</g>`;
   }else{
-    svg += `<g fill="${fgColor}" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+    svg += `<g fill="${fgColor}" ${groupAttrs}>${textMarkup}</g>`;
   }
   svg += '</svg>';
   return svg;
 }
 
-function asciiLinesToSVGTexts(lines, cellWidth, cellHeight, colors, gridWidth){
+function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
   if(!lines || !lines.length){
-    return '';
+    return {textMarkup: '', backgroundMarkup: '', usesPerGlyphFill: false};
   }
+  const gridWidth = Math.max(0, options.gridWidth || (lines[0] ? lines[0].length : 0));
+  const colorArray = options.colors && gridWidth
+    ? ensureUint8Array(options.colors)
+    : null;
+  const totalCells = gridWidth * lines.length;
+  const hasColors = colorArray && colorArray.length >= totalCells * 3;
+  const mode = options.mode || 'ascii_simple';
+  const asciiPixel = mode === 'ascii_pixel';
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
   const stepX = cellWidth;
   const stepY = cellHeight;
-  const hasColors = colors && gridWidth && colors.length >= gridWidth * lines.length * 3;
-  const cache = hasColors ? new Map() : null;
-  let markup = '';
+  const textColorCache = hasColors && !asciiPixel ? new Map() : null;
+  const asciiPixelCache = asciiPixel && hasColors ? new Map() : null;
+  const asciiPixelThreshold = options.asciiPixelThreshold != null ? options.asciiPixelThreshold : 150;
+  const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
+  const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
+  let textMarkup = '';
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
     const baseY = offsetY + y*stepY;
-    for(let x=0;x<line.length;x++){
+    for(let x=0;x<gridWidth;x++){
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
       }
       const baseX = offsetX + x*stepX;
       let fillAttr = '';
-      if(hasColors){
+      if(asciiPixel && hasColors){
         const idx = (y*gridWidth + x) * 3;
-        const r = colors[idx];
-        const g = colors[idx+1];
-        const b = colors[idx+2];
+        const r = colorArray[idx];
+        const g = colorArray[idx+1];
+        const b = colorArray[idx+2];
+        const luminance = 0.2126*r + 0.7152*g + 0.0722*b;
+        const bucket = luminance >= asciiPixelThreshold ? 1 : 0;
+        let fill = asciiPixelCache.get(bucket);
+        if(!fill){
+          fill = bucket ? asciiPixelDark : asciiPixelLight;
+          asciiPixelCache.set(bucket, fill);
+        }
+        fillAttr = ` fill="${fill}"`;
+      }else if(hasColors){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colorArray[idx];
+        const g = colorArray[idx+1];
+        const b = colorArray[idx+2];
         const key = (r << 16) | (g << 8) | b;
-        let fill = cache.get(key);
+        let fill = textColorCache.get(key);
         if(!fill){
           fill = `rgb(${r},${g},${b})`;
-          cache.set(key, fill);
+          textColorCache.set(key, fill);
         }
         fillAttr = ` fill="${fill}"`;
       }
-      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
+      textMarkup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
     }
   }
-  return markup;
+  let backgroundMarkup = '';
+  if(asciiPixel && hasColors && gridWidth > 0){
+    const pathMap = new Map();
+    const buildEntry = (colorKey) => {
+      let entry = pathMap.get(colorKey);
+      if(!entry){
+        entry = {
+          path: '',
+          r: (colorKey >> 16) & 0xFF,
+          g: (colorKey >> 8) & 0xFF,
+          b: colorKey & 0xFF
+        };
+        pathMap.set(colorKey, entry);
+      }
+      return entry;
+    };
+    for(let y=0;y<lines.length;y++){
+      let runColor = -1;
+      let runStart = 0;
+      const flushRun = (colorKey, start, end) => {
+        if(colorKey === -1) return;
+        const length = end - start;
+        if(length <= 0) return;
+        const entry = buildEntry(colorKey);
+        const rectWidth = length * stepX;
+        const rectHeight = stepY;
+        const rectX = start * stepX;
+        const rectY = y * stepY;
+        entry.path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(rectHeight)}h-${formatNumber(rectWidth)}z`;
+      };
+      for(let x=0;x<=gridWidth;x++){
+        let colorKey = -1;
+        if(x < gridWidth){
+          const idx = (y*gridWidth + x) * 3;
+          const r = colorArray[idx];
+          const g = colorArray[idx+1];
+          const b = colorArray[idx+2];
+          colorKey = (r << 16) | (g << 8) | b;
+        }
+        if(colorKey !== runColor){
+          flushRun(runColor, runStart, x);
+          runColor = colorKey;
+          runStart = x;
+        }
+      }
+    }
+    pathMap.forEach((entry) => {
+      backgroundMarkup += `<path fill="rgb(${entry.r},${entry.g},${entry.b})" d="${entry.path}"/>`;
+    });
+  }
+  return {
+    textMarkup,
+    backgroundMarkup,
+    usesPerGlyphFill: asciiPixel || hasColors
+  };
 }
 
 function buildExportSVG(result, options){
@@ -2761,30 +2848,71 @@ function paintAscii(ctx, data, outWidth, outHeight){
   const offsetY = cellHeight / 2;
   const colorArray = data.colors ? ensureUint8Array(data.colors) : null;
   const hasColors = colorArray && colorArray.length >= gridWidth*gridHeight*3;
-  const colorCache = hasColors ? new Map() : null;
+  const mode = data.mode || data.kind || 'ascii_simple';
+  const isAsciiPixel = mode === 'ascii_pixel';
   const glowAmount = Math.max(0, data.glow || 0);
-  if(glowAmount > 0 && !hasColors){
+  if(glowAmount > 0 && (!hasColors || !isAsciiPixel)){
     const fgRGB = hexToRGB(data.fg || '#000000');
     const glowRGB = lightenColor(fgRGB, 0.4);
     ctx.save();
     ctx.fillStyle = `rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})`;
     ctx.shadowColor = `rgba(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]},0.85)`;
     ctx.shadowBlur = Math.max(2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.45 + glowAmount/80));
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, null, null);
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
     ctx.restore();
   }
-  if(!hasColors){
-    ctx.fillStyle = data.fg || '#000000';
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, null, null);
+  if(isAsciiPixel && hasColors){
+    const backgroundCache = new Map();
+    for(let y=0;y<gridHeight;y++){
+      const rowOffset = y*gridWidth;
+      const drawY = y * cellHeight;
+      for(let x=0;x<gridWidth;x++){
+        const idx = (rowOffset + x) * 3;
+        const r = colorArray[idx];
+        const g = colorArray[idx+1];
+        const b = colorArray[idx+2];
+        const key = (r << 16) | (g << 8) | b;
+        let fill = backgroundCache.get(key);
+        if(!fill){
+          fill = `rgb(${r},${g},${b})`;
+          backgroundCache.set(key, fill);
+        }
+        const drawX = x * cellWidth;
+        ctx.fillStyle = fill;
+        ctx.fillRect(drawX, drawY, cellWidth, cellHeight);
+      }
+    }
+    const asciiPixelCache = new Map();
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, {
+      colors: colorArray,
+      asciiPixel: true,
+      asciiPixelCache,
+      asciiPixelLight: data.asciiPixelLight || 'rgba(248,248,248,0.95)',
+      asciiPixelDark: data.asciiPixelDark || 'rgba(16,16,16,0.88)'
+    });
+  }else if(hasColors){
+    const colorCache = new Map();
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, {
+      colors: colorArray,
+      colorCache
+    });
   }else{
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, colorArray, colorCache);
+    ctx.fillStyle = data.fg || '#000000';
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
   }
   ctx.restore();
 }
 
-function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, colors, cache){
-  const hasColors = colors && colors.length >= gridWidth * lines.length * 3;
-  const cacheMap = hasColors ? (cache || new Map()) : null;
+function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, options = {}){
+  const colors = options.colors;
+  const totalCells = gridWidth * lines.length;
+  const hasColors = colors && colors.length >= totalCells * 3;
+  const asciiPixel = Boolean(options.asciiPixel && hasColors);
+  const colorCache = hasColors && !asciiPixel ? (options.colorCache || new Map()) : null;
+  const asciiPixelCache = asciiPixel ? (options.asciiPixelCache || new Map()) : null;
+  const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
+  const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
+  const asciiPixelThreshold = options.asciiPixelThreshold != null ? options.asciiPixelThreshold : 150;
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
@@ -2794,16 +2922,29 @@ function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cell
       if(!ch || ch === ' '){
         continue;
       }
-      if(hasColors){
+      if(asciiPixel){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colors[idx];
+        const g = colors[idx+1];
+        const b = colors[idx+2];
+        const luminance = 0.2126*r + 0.7152*g + 0.0722*b;
+        const bucket = luminance >= asciiPixelThreshold ? 1 : 0;
+        let fill = asciiPixelCache.get(bucket);
+        if(!fill){
+          fill = bucket ? asciiPixelDark : asciiPixelLight;
+          asciiPixelCache.set(bucket, fill);
+        }
+        ctx.fillStyle = fill;
+      }else if(hasColors){
         const idx = (y*gridWidth + x) * 3;
         const r = colors[idx];
         const g = colors[idx+1];
         const b = colors[idx+2];
         const key = (r << 16) | (g << 8) | b;
-        let fill = cacheMap.get(key);
+        let fill = colorCache.get(key);
         if(!fill){
           fill = `rgb(${r},${g},${b})`;
-          cacheMap.set(key, fill);
+          colorCache.set(key, fill);
         }
         ctx.fillStyle = fill;
       }
@@ -3290,6 +3431,7 @@ function renderAsciiFrameImageData(frame, outWidth, outHeight, options, override
     gridWidth: frame.gridWidth,
     gridHeight: frame.gridHeight,
     tile: frame.tile,
+    mode: frame.mode || (options && options.mode) || 'ascii_simple',
     bg: overrides.bg != null ? overrides.bg : (options && options.bg != null ? options.bg : 'transparent'),
     fg: overrides.fg != null ? overrides.fg : (options && options.fg != null ? options.fg : '#ffffff'),
     glow: overrides.glow != null ? overrides.glow : 0,
