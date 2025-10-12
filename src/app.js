@@ -42,6 +42,7 @@ const ASCII_CUSTOM_MAX = 64;
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
+  ascii_pixel: [' ','░','▒','▓','█'],
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
 };
 

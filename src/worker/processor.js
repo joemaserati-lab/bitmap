@@ -81,6 +81,7 @@ const DIFFUSION_KERNELS = {
 
 const ASCII_SETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
+  ascii_pixel: [' ','░','▒','▓','█'],
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@']
 };
 
