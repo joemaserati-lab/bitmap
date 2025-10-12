@@ -2137,7 +2137,6 @@ function createFrameData(result, options){
     const normalizedCharsetString = charsetKey === 'ascii_custom'
       ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
       : effectiveCharset.join('');
-    const colorArray = result.colors ? ensureUint8Array(result.colors) : null;
     return {
       kind: 'ascii',
       gridWidth: result.gridWidth,
@@ -2147,7 +2146,6 @@ function createFrameData(result, options){
       lines,
       charsetKey,
       charsetString: normalizedCharsetString,
-      colors: colorArray,
       outputWidth: finalWidth,
       outputHeight: finalHeight,
       aspectWidth,
@@ -2210,7 +2208,6 @@ function buildPreviewData(frame, options){
       lines: frame.lines,
       charsetKey: frame.charsetKey,
       charsetString: frame.charsetString,
-      colors: frame.colors,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -2361,20 +2358,10 @@ function buildAsciiSVGString(frame, options){
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
-  const colorArray = frame.colors ? ensureUint8Array(frame.colors) : null;
-  const asciiElements = asciiLinesToSVGElements(lines, cellWidth, cellHeight, {
-    colors: colorArray,
-    gridWidth: frame.gridWidth,
-    mode: frame.mode || options.mode || 'ascii_simple'
-  });
-  const usesPerGlyphFill = asciiElements.usesPerGlyphFill;
-  const textMarkup = asciiElements.textMarkup;
+  const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
   if(options.bg && options.bg !== 'transparent'){
     svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
-  }
-  if(asciiElements.backgroundMarkup){
-    svg += asciiElements.backgroundMarkup;
   }
   if(!textMarkup){
     svg += '</svg>';
@@ -2383,7 +2370,7 @@ function buildAsciiSVGString(frame, options){
   const fontSize = Math.max(2, Math.min(cellWidth, cellHeight) * 0.92);
   const fgColor = options.fg || '#000000';
   const glowAmount = Math.max(0, options.glow || 0);
-  if(glowAmount > 0 && !usesPerGlyphFill){
+  if(glowAmount > 0){
     const fgRGB = hexToRGB(fgColor);
     const glowRGB = lightenColor(fgRGB, 0.4);
     const blurRadius = Math.max(0.2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.4 + glowAmount/90));
@@ -2391,133 +2378,34 @@ function buildAsciiSVGString(frame, options){
     svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
     svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
   }
-  const groupAttrs = `font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0"`;
-  if(usesPerGlyphFill){
-    svg += `<g ${groupAttrs}>${textMarkup}</g>`;
-  }else{
-    svg += `<g fill="${fgColor}" ${groupAttrs}>${textMarkup}</g>`;
-  }
+  svg += `<g fill="${fgColor}" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
   svg += '</svg>';
   return svg;
 }
 
-function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
+function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
   if(!lines || !lines.length){
-    return {textMarkup: '', backgroundMarkup: '', usesPerGlyphFill: false};
+    return '';
   }
-  const gridWidth = Math.max(0, options.gridWidth || (lines[0] ? lines[0].length : 0));
-  const colorArray = options.colors && gridWidth
-    ? ensureUint8Array(options.colors)
-    : null;
-  const totalCells = gridWidth * lines.length;
-  const hasColors = colorArray && colorArray.length >= totalCells * 3;
-  const mode = options.mode || 'ascii_simple';
-  const asciiPixel = mode === 'ascii_pixel';
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
   const stepX = cellWidth;
   const stepY = cellHeight;
-  const textColorCache = hasColors && !asciiPixel ? new Map() : null;
-  const asciiPixelCache = asciiPixel && hasColors ? new Map() : null;
-  const asciiPixelThreshold = options.asciiPixelThreshold != null ? options.asciiPixelThreshold : 150;
-  const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
-  const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
-  let textMarkup = '';
+  let markup = '';
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
     const baseY = offsetY + y*stepY;
-    for(let x=0;x<gridWidth;x++){
+    for(let x=0;x<line.length;x++){
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
       }
       const baseX = offsetX + x*stepX;
-      let fillAttr = '';
-      if(asciiPixel && hasColors){
-        const idx = (y*gridWidth + x) * 3;
-        const r = colorArray[idx];
-        const g = colorArray[idx+1];
-        const b = colorArray[idx+2];
-        const luminance = 0.2126*r + 0.7152*g + 0.0722*b;
-        const bucket = luminance >= asciiPixelThreshold ? 1 : 0;
-        let fill = asciiPixelCache.get(bucket);
-        if(!fill){
-          fill = bucket ? asciiPixelDark : asciiPixelLight;
-          asciiPixelCache.set(bucket, fill);
-        }
-        fillAttr = ` fill="${fill}"`;
-      }else if(hasColors){
-        const idx = (y*gridWidth + x) * 3;
-        const r = colorArray[idx];
-        const g = colorArray[idx+1];
-        const b = colorArray[idx+2];
-        const key = (r << 16) | (g << 8) | b;
-        let fill = textColorCache.get(key);
-        if(!fill){
-          fill = `rgb(${r},${g},${b})`;
-          textColorCache.set(key, fill);
-        }
-        fillAttr = ` fill="${fill}"`;
-      }
-      textMarkup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
+      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle">${escapeXML(ch)}</text>`;
     }
   }
-  let backgroundMarkup = '';
-  if(asciiPixel && hasColors && gridWidth > 0){
-    const pathMap = new Map();
-    const buildEntry = (colorKey) => {
-      let entry = pathMap.get(colorKey);
-      if(!entry){
-        entry = {
-          path: '',
-          r: (colorKey >> 16) & 0xFF,
-          g: (colorKey >> 8) & 0xFF,
-          b: colorKey & 0xFF
-        };
-        pathMap.set(colorKey, entry);
-      }
-      return entry;
-    };
-    for(let y=0;y<lines.length;y++){
-      let runColor = -1;
-      let runStart = 0;
-      const flushRun = (colorKey, start, end) => {
-        if(colorKey === -1) return;
-        const length = end - start;
-        if(length <= 0) return;
-        const entry = buildEntry(colorKey);
-        const rectWidth = length * stepX;
-        const rectHeight = stepY;
-        const rectX = start * stepX;
-        const rectY = y * stepY;
-        entry.path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(rectHeight)}h-${formatNumber(rectWidth)}z`;
-      };
-      for(let x=0;x<=gridWidth;x++){
-        let colorKey = -1;
-        if(x < gridWidth){
-          const idx = (y*gridWidth + x) * 3;
-          const r = colorArray[idx];
-          const g = colorArray[idx+1];
-          const b = colorArray[idx+2];
-          colorKey = (r << 16) | (g << 8) | b;
-        }
-        if(colorKey !== runColor){
-          flushRun(runColor, runStart, x);
-          runColor = colorKey;
-          runStart = x;
-        }
-      }
-    }
-    pathMap.forEach((entry) => {
-      backgroundMarkup += `<path fill="rgb(${entry.r},${entry.g},${entry.b})" d="${entry.path}"/>`;
-    });
-  }
-  return {
-    textMarkup,
-    backgroundMarkup,
-    usesPerGlyphFill: asciiPixel || hasColors
-  };
+  return markup;
 }
 
 function buildExportSVG(result, options){
@@ -2846,12 +2734,8 @@ function paintAscii(ctx, data, outWidth, outHeight){
   ctx.imageSmoothingEnabled = false;
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
-  const colorArray = data.colors ? ensureUint8Array(data.colors) : null;
-  const hasColors = colorArray && colorArray.length >= gridWidth*gridHeight*3;
-  const mode = data.mode || data.kind || 'ascii_simple';
-  const isAsciiPixel = mode === 'ascii_pixel';
   const glowAmount = Math.max(0, data.glow || 0);
-  if(glowAmount > 0 && (!hasColors || !isAsciiPixel)){
+  if(glowAmount > 0){
     const fgRGB = hexToRGB(data.fg || '#000000');
     const glowRGB = lightenColor(fgRGB, 0.4);
     ctx.save();
@@ -2861,58 +2745,12 @@ function paintAscii(ctx, data, outWidth, outHeight){
     drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
     ctx.restore();
   }
-  if(isAsciiPixel && hasColors){
-    const backgroundCache = new Map();
-    for(let y=0;y<gridHeight;y++){
-      const rowOffset = y*gridWidth;
-      const drawY = y * cellHeight;
-      for(let x=0;x<gridWidth;x++){
-        const idx = (rowOffset + x) * 3;
-        const r = colorArray[idx];
-        const g = colorArray[idx+1];
-        const b = colorArray[idx+2];
-        const key = (r << 16) | (g << 8) | b;
-        let fill = backgroundCache.get(key);
-        if(!fill){
-          fill = `rgb(${r},${g},${b})`;
-          backgroundCache.set(key, fill);
-        }
-        const drawX = x * cellWidth;
-        ctx.fillStyle = fill;
-        ctx.fillRect(drawX, drawY, cellWidth, cellHeight);
-      }
-    }
-    const asciiPixelCache = new Map();
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, {
-      colors: colorArray,
-      asciiPixel: true,
-      asciiPixelCache,
-      asciiPixelLight: data.asciiPixelLight || 'rgba(248,248,248,0.95)',
-      asciiPixelDark: data.asciiPixelDark || 'rgba(16,16,16,0.88)'
-    });
-  }else if(hasColors){
-    const colorCache = new Map();
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, {
-      colors: colorArray,
-      colorCache
-    });
-  }else{
-    ctx.fillStyle = data.fg || '#000000';
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
-  }
+  ctx.fillStyle = data.fg || '#000000';
+  drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
   ctx.restore();
 }
 
-function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, options = {}){
-  const colors = options.colors;
-  const totalCells = gridWidth * lines.length;
-  const hasColors = colors && colors.length >= totalCells * 3;
-  const asciiPixel = Boolean(options.asciiPixel && hasColors);
-  const colorCache = hasColors && !asciiPixel ? (options.colorCache || new Map()) : null;
-  const asciiPixelCache = asciiPixel ? (options.asciiPixelCache || new Map()) : null;
-  const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
-  const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
-  const asciiPixelThreshold = options.asciiPixelThreshold != null ? options.asciiPixelThreshold : 150;
+function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight){
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
@@ -2921,32 +2759,6 @@ function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cell
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
-      }
-      if(asciiPixel){
-        const idx = (y*gridWidth + x) * 3;
-        const r = colors[idx];
-        const g = colors[idx+1];
-        const b = colors[idx+2];
-        const luminance = 0.2126*r + 0.7152*g + 0.0722*b;
-        const bucket = luminance >= asciiPixelThreshold ? 1 : 0;
-        let fill = asciiPixelCache.get(bucket);
-        if(!fill){
-          fill = bucket ? asciiPixelDark : asciiPixelLight;
-          asciiPixelCache.set(bucket, fill);
-        }
-        ctx.fillStyle = fill;
-      }else if(hasColors){
-        const idx = (y*gridWidth + x) * 3;
-        const r = colors[idx];
-        const g = colors[idx+1];
-        const b = colors[idx+2];
-        const key = (r << 16) | (g << 8) | b;
-        let fill = colorCache.get(key);
-        if(!fill){
-          fill = `rgb(${r},${g},${b})`;
-          colorCache.set(key, fill);
-        }
-        ctx.fillStyle = fill;
       }
       const posX = Math.round((x*cellWidth + offsetX) * 10) / 10;
       ctx.fillText(ch, posX, posY);
@@ -3411,12 +3223,12 @@ function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight, til
   return output;
 }
 
-function renderAsciiFrameImageData(frame, outWidth, outHeight, options, overrides={}){
+function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
   const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
   const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
   const canvas = createExportCanvas(width, height, {forceDOM: true});
   const ctx = canvas.getContext('2d', {alpha: true});
-  if(!ctx) return null;
+  if(!ctx) return new Uint8Array(width*height);
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(
@@ -3431,26 +3243,14 @@ function renderAsciiFrameImageData(frame, outWidth, outHeight, options, override
     gridWidth: frame.gridWidth,
     gridHeight: frame.gridHeight,
     tile: frame.tile,
-    mode: frame.mode || (options && options.mode) || 'ascii_simple',
-    bg: overrides.bg != null ? overrides.bg : (options && options.bg != null ? options.bg : 'transparent'),
-    fg: overrides.fg != null ? overrides.fg : (options && options.fg != null ? options.fg : '#ffffff'),
-    glow: overrides.glow != null ? overrides.glow : 0,
-    colors: frame.colors
+    bg: 'transparent',
+    fg: '#ffffff',
+    glow: 0
   }, width, height);
-  return ctx.getImageData(0, 0, width, height);
-}
-
-function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
-  const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, {bg: 'transparent', fg: '#ffffff', glow: 0});
-  if(!imageData){
-    const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
-    const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
-    return new Uint8Array(width*height);
-  }
-  const { data, width, height } = imageData;
+  const imageData = ctx.getImageData(0, 0, width, height).data;
   const binary = new Uint8Array(width*height);
-  for(let i=0, p=0;i<data.length;i+=4,p++){
-    binary[p] = data[i+3] > 32 ? 1 : 0;
+  for(let i=0, p=0;i<imageData.length;i+=4,p++){
+    binary[p] = imageData[i+3] > 32 ? 1 : 0;
   }
   return binary;
 }
@@ -3477,32 +3277,9 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
     return {indexes, palette, transparentIndex: -1, paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined)};
   }
   if(frame.kind === 'ascii'){
-    const hasColors = frame.colors && frame.colors.length;
-    const asciiOverrides = hasColors
-      ? { bg: options.bg != null ? options.bg : 'transparent', fg: options.fg, glow: 0 }
-      : { bg: 'transparent', fg: '#ffffff', glow: 0 };
-    const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, asciiOverrides);
-    if(!imageData){
-      const fallbackIndexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
-      const fallbackPalette = buildBinaryPalette(options.bg, options.fg);
-      return {indexes: fallbackIndexes, palette: fallbackPalette.palette, transparentIndex: fallbackPalette.transparentIndex};
-    }
-    if(hasColors){
-      const samples = [];
-      const hasTrans = collectGifColorSamples(imageData, samples, options.bg === 'transparent');
-      const paletteInfo = buildGifPalette(samples, hasTrans);
-      const palette = paletteInfo.palette;
-      const transparentIndex = paletteInfo.transparentIndex;
-      const indexes = imageDataToPaletteIndexes(imageData, palette, transparentIndex);
-      return {indexes, palette, transparentIndex};
-    }
-    const binary = new Uint8Array(imageData.width * imageData.height);
-    const pixels = imageData.data;
-    for(let i=0, p=0;i<pixels.length;i+=4,p++){
-      binary[p] = pixels[i+3] > 32 ? 1 : 0;
-    }
+    const indexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
     const paletteInfo = buildBinaryPalette(options.bg, options.fg);
-    return {indexes: binary, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+    return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
   }
   const indexes = maskToBinaryFrame(
     frame.mask,
