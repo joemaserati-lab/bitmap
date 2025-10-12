@@ -1,3 +1,5 @@
+import { applyToCanvas } from './postfx.js';
+import { ensureEffect } from './effects/index.js';
 
 const $ = (id) => document.getElementById(id);
 
