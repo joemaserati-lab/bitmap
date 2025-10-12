@@ -2137,6 +2137,7 @@ function createFrameData(result, options){
     const normalizedCharsetString = charsetKey === 'ascii_custom'
       ? normalizeCustomASCIIString(charsetString || options.asciiCustom || state.customASCIIString)
       : effectiveCharset.join('');
+    const colorArray = result.colors ? ensureUint8Array(result.colors) : null;
     return {
       kind: 'ascii',
       gridWidth: result.gridWidth,
@@ -2146,6 +2147,7 @@ function createFrameData(result, options){
       lines,
       charsetKey,
       charsetString: normalizedCharsetString,
+      colors: colorArray,
       outputWidth: finalWidth,
       outputHeight: finalHeight,
       aspectWidth,
@@ -2208,6 +2210,7 @@ function buildPreviewData(frame, options){
       lines: frame.lines,
       charsetKey: frame.charsetKey,
       charsetString: frame.charsetString,
+      colors: frame.colors,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -2358,7 +2361,9 @@ function buildAsciiSVGString(frame, options){
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(frame.ascii, frame.gridWidth, frame.gridHeight, getASCIICharset(frame.charsetKey, frame.charsetString));
-  const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight);
+  const colorArray = frame.colors ? ensureUint8Array(frame.colors) : null;
+  const hasColors = colorArray && colorArray.length >= frame.gridWidth*frame.gridHeight*3;
+  const textMarkup = asciiLinesToSVGTexts(lines, cellWidth, cellHeight, hasColors ? colorArray : null, frame.gridWidth);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
   if(options.bg && options.bg !== 'transparent'){
     svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
@@ -2370,7 +2375,7 @@ function buildAsciiSVGString(frame, options){
   const fontSize = Math.max(2, Math.min(cellWidth, cellHeight) * 0.92);
   const fgColor = options.fg || '#000000';
   const glowAmount = Math.max(0, options.glow || 0);
-  if(glowAmount > 0){
+  if(glowAmount > 0 && !hasColors){
     const fgRGB = hexToRGB(fgColor);
     const glowRGB = lightenColor(fgRGB, 0.4);
     const blurRadius = Math.max(0.2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.4 + glowAmount/90));
@@ -2378,12 +2383,16 @@ function buildAsciiSVGString(frame, options){
     svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
     svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
   }
-  svg += `<g fill="${fgColor}" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  if(hasColors){
+    svg += `<g font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  }else{
+    svg += `<g fill="${fgColor}" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+  }
   svg += '</svg>';
   return svg;
 }
 
-function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
+function asciiLinesToSVGTexts(lines, cellWidth, cellHeight, colors, gridWidth){
   if(!lines || !lines.length){
     return '';
   }
@@ -2391,6 +2400,8 @@ function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
   const offsetY = cellHeight / 2;
   const stepX = cellWidth;
   const stepY = cellHeight;
+  const hasColors = colors && gridWidth && colors.length >= gridWidth * lines.length * 3;
+  const cache = hasColors ? new Map() : null;
   let markup = '';
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
@@ -2402,7 +2413,21 @@ function asciiLinesToSVGTexts(lines, cellWidth, cellHeight){
         continue;
       }
       const baseX = offsetX + x*stepX;
-      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle">${escapeXML(ch)}</text>`;
+      let fillAttr = '';
+      if(hasColors){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colors[idx];
+        const g = colors[idx+1];
+        const b = colors[idx+2];
+        const key = (r << 16) | (g << 8) | b;
+        let fill = cache.get(key);
+        if(!fill){
+          fill = `rgb(${r},${g},${b})`;
+          cache.set(key, fill);
+        }
+        fillAttr = ` fill="${fill}"`;
+      }
+      markup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
     }
   }
   return markup;
@@ -2734,23 +2759,32 @@ function paintAscii(ctx, data, outWidth, outHeight){
   ctx.imageSmoothingEnabled = false;
   const offsetX = cellWidth / 2;
   const offsetY = cellHeight / 2;
+  const colorArray = data.colors ? ensureUint8Array(data.colors) : null;
+  const hasColors = colorArray && colorArray.length >= gridWidth*gridHeight*3;
+  const colorCache = hasColors ? new Map() : null;
   const glowAmount = Math.max(0, data.glow || 0);
-  if(glowAmount > 0){
+  if(glowAmount > 0 && !hasColors){
     const fgRGB = hexToRGB(data.fg || '#000000');
     const glowRGB = lightenColor(fgRGB, 0.4);
     ctx.save();
     ctx.fillStyle = `rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})`;
     ctx.shadowColor = `rgba(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]},0.85)`;
     ctx.shadowBlur = Math.max(2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.45 + glowAmount/80));
-    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, null, null);
     ctx.restore();
   }
-  ctx.fillStyle = data.fg || '#000000';
-  drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight);
+  if(!hasColors){
+    ctx.fillStyle = data.fg || '#000000';
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, null, null);
+  }else{
+    drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, colorArray, colorCache);
+  }
   ctx.restore();
 }
 
-function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight){
+function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cellHeight, colors, cache){
+  const hasColors = colors && colors.length >= gridWidth * lines.length * 3;
+  const cacheMap = hasColors ? (cache || new Map()) : null;
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
@@ -2759,6 +2793,19 @@ function drawAsciiLines(ctx, lines, gridWidth, offsetX, offsetY, cellWidth, cell
       const ch = line.charAt(x);
       if(!ch || ch === ' '){
         continue;
+      }
+      if(hasColors){
+        const idx = (y*gridWidth + x) * 3;
+        const r = colors[idx];
+        const g = colors[idx+1];
+        const b = colors[idx+2];
+        const key = (r << 16) | (g << 8) | b;
+        let fill = cacheMap.get(key);
+        if(!fill){
+          fill = `rgb(${r},${g},${b})`;
+          cacheMap.set(key, fill);
+        }
+        ctx.fillStyle = fill;
       }
       const posX = Math.round((x*cellWidth + offsetX) * 10) / 10;
       ctx.fillText(ch, posX, posY);
@@ -3223,12 +3270,12 @@ function maskToBinaryFrame(mask, gridWidth, gridHeight, outWidth, outHeight, til
   return output;
 }
 
-function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
+function renderAsciiFrameImageData(frame, outWidth, outHeight, options, overrides={}){
   const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
   const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
   const canvas = createExportCanvas(width, height, {forceDOM: true});
   const ctx = canvas.getContext('2d', {alpha: true});
-  if(!ctx) return new Uint8Array(width*height);
+  if(!ctx) return null;
   const lines = frame.lines && frame.lines.length
     ? frame.lines
     : asciiBufferToLines(
@@ -3243,14 +3290,25 @@ function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
     gridWidth: frame.gridWidth,
     gridHeight: frame.gridHeight,
     tile: frame.tile,
-    bg: 'transparent',
-    fg: '#ffffff',
-    glow: 0
+    bg: overrides.bg != null ? overrides.bg : (options && options.bg != null ? options.bg : 'transparent'),
+    fg: overrides.fg != null ? overrides.fg : (options && options.fg != null ? options.fg : '#ffffff'),
+    glow: overrides.glow != null ? overrides.glow : 0,
+    colors: frame.colors
   }, width, height);
-  const imageData = ctx.getImageData(0, 0, width, height).data;
+  return ctx.getImageData(0, 0, width, height);
+}
+
+function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
+  const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, {bg: 'transparent', fg: '#ffffff', glow: 0});
+  if(!imageData){
+    const width = Math.max(1, Math.round(outWidth || frame.outputWidth || 1));
+    const height = Math.max(1, Math.round(outHeight || frame.outputHeight || 1));
+    return new Uint8Array(width*height);
+  }
+  const { data, width, height } = imageData;
   const binary = new Uint8Array(width*height);
-  for(let i=0, p=0;i<imageData.length;i+=4,p++){
-    binary[p] = imageData[i+3] > 32 ? 1 : 0;
+  for(let i=0, p=0;i<data.length;i+=4,p++){
+    binary[p] = data[i+3] > 32 ? 1 : 0;
   }
   return binary;
 }
@@ -3277,9 +3335,32 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
     return {indexes, palette, transparentIndex: -1, paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined)};
   }
   if(frame.kind === 'ascii'){
-    const indexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
+    const hasColors = frame.colors && frame.colors.length;
+    const asciiOverrides = hasColors
+      ? { bg: options.bg != null ? options.bg : 'transparent', fg: options.fg, glow: 0 }
+      : { bg: 'transparent', fg: '#ffffff', glow: 0 };
+    const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, asciiOverrides);
+    if(!imageData){
+      const fallbackIndexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
+      const fallbackPalette = buildBinaryPalette(options.bg, options.fg);
+      return {indexes: fallbackIndexes, palette: fallbackPalette.palette, transparentIndex: fallbackPalette.transparentIndex};
+    }
+    if(hasColors){
+      const samples = [];
+      const hasTrans = collectGifColorSamples(imageData, samples, options.bg === 'transparent');
+      const paletteInfo = buildGifPalette(samples, hasTrans);
+      const palette = paletteInfo.palette;
+      const transparentIndex = paletteInfo.transparentIndex;
+      const indexes = imageDataToPaletteIndexes(imageData, palette, transparentIndex);
+      return {indexes, palette, transparentIndex};
+    }
+    const binary = new Uint8Array(imageData.width * imageData.height);
+    const pixels = imageData.data;
+    for(let i=0, p=0;i<pixels.length;i+=4,p++){
+      binary[p] = pixels[i+3] > 32 ? 1 : 0;
+    }
     const paletteInfo = buildBinaryPalette(options.bg, options.fg);
-    return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+    return {indexes: binary, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
   }
   const indexes = maskToBinaryFrame(
     frame.mask,
