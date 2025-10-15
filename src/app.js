@@ -50,7 +50,7 @@ const ASCII_CHARSETS = {
   ascii_word: [' ','P','I','X','E','L']
 };
 
-const ALGORITHM_DEFS = [
+const ADVANCED_DITHER_DEFS = [
   {
     id: 'blueNoise',
     label: 'Blue Noise',
@@ -310,10 +310,9 @@ const state = {
   previewPlayer: null,
   customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM),
   asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD),
-  algorithmSettings: {},
-  algorithmControls: new Map(),
-  algorithmHotkeys: new Map(),
-  algorithmActiveCanvas: null
+  advancedDitherSettings: {},
+  advancedDitherControls: new Map(),
+  advancedDitherActiveCanvas: null
 };
 
 let renderQueued = false;
@@ -330,9 +329,7 @@ function init(){
   bindDropzone();
   bindExportModal();
   bindPlaybackControl();
-  initAlgorithmUI();
-  bindAlgorithmPresetButtons();
-  bindAlgorithmHotkeys();
+  initAdvancedDitherControls();
   if(controls.asciiChars){
     controls.asciiChars.value = state.customASCIIString;
   }
@@ -454,6 +451,7 @@ function bindControls(){
     el.addEventListener('change', () => {
       if(id === 'dither'){
         updateAsciiCustomVisibility();
+        updateAdvancedDitherVisibility();
       }
       fastRender();
     });
@@ -841,39 +839,21 @@ function bindPlaybackControl(){
   });
 }
 
-function initAlgorithmUI(){
-  const container = $('algorithmList');
-  if(!container){
+function initAdvancedDitherControls(){
+  const panel = $('ditherAdvancedPanel');
+  const container = $('ditherAdvancedControls');
+  if(!panel || !container){
     return;
   }
   container.innerHTML = '';
-  state.algorithmSettings = {};
-  state.algorithmControls = new Map();
-  state.algorithmHotkeys = new Map();
-  for(const def of ALGORITHM_DEFS){
-    const defaults = cloneAlgorithmDefaults(def.defaults || {});
-    state.algorithmSettings[def.id] = {
-      enabled: false,
-      params: defaults
-    };
-    if(def.hotkey){
-      state.algorithmHotkeys.set(def.hotkey.toLowerCase(), def.id);
-    }
-    const item = document.createElement('div');
-    item.className = 'algorithm-item';
-    const header = document.createElement('div');
-    header.className = 'algorithm-item__header';
-    const title = document.createElement('label');
-    title.className = 'algorithm-item__title';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.id = `algo-${def.id}`;
-    title.htmlFor = checkbox.id;
-    title.textContent = def.label;
-    header.appendChild(title);
-    header.appendChild(checkbox);
-    const controlsWrap = document.createElement('div');
-    controlsWrap.className = 'algorithm-item__controls';
+  state.advancedDitherSettings = {};
+  state.advancedDitherControls = new Map();
+  for(const def of ADVANCED_DITHER_DEFS){
+    const defaults = cloneAdvancedDefaults(def.defaults || {});
+    state.advancedDitherSettings[def.id] = { params: defaults };
+    const group = document.createElement('div');
+    group.className = 'dither-advanced__group';
+    group.hidden = true;
     const paramRefs = new Map();
     for(const param of def.params || []){
       const field = document.createElement('div');
@@ -881,37 +861,25 @@ function initAlgorithmUI(){
       const label = document.createElement('label');
       label.textContent = param.label || param.key;
       field.appendChild(label);
-      const { input, display } = createAlgorithmParamInput(def, param, defaults[param.key]);
+      const { input, display } = createAdvancedDitherInput(def, param, defaults[param.key]);
       if(param.placeholder){
         input.placeholder = param.placeholder;
       }
-      input.disabled = true;
+      field.appendChild(input);
       if(display){
         field.appendChild(display);
       }
-      field.appendChild(input);
-      controlsWrap.appendChild(field);
+      group.appendChild(field);
       paramRefs.set(param.key, { input, display, definition: param });
     }
-    checkbox.addEventListener('change', () => {
-      const settings = state.algorithmSettings[def.id];
-      settings.enabled = checkbox.checked;
-      setAlgorithmControlsEnabled(def.id, checkbox.checked);
-      handleAlgorithmChange();
-    });
-    item.appendChild(header);
-    if((def.params || []).length){
-      item.appendChild(controlsWrap);
-    }
-    container.appendChild(item);
-    state.algorithmControls.set(def.id, { root: item, checkbox, params: paramRefs });
-    setAlgorithmControlsEnabled(def.id, false);
-    syncAlgorithmControlValues(def.id);
+    container.appendChild(group);
+    state.advancedDitherControls.set(def.id, { root: group, params: paramRefs });
   }
+  updateAdvancedDitherVisibility();
 }
 
-function createAlgorithmParamInput(def, param, defaultValue){
-  let value = defaultValue;
+function createAdvancedDitherInput(def, param, initialValue){
+  let value = initialValue;
   if(value === undefined){
     value = param.type === 'checkbox' ? false : '';
   }
@@ -923,11 +891,10 @@ function createAlgorithmParamInput(def, param, defaultValue){
       const opt = document.createElement('option');
       opt.value = String(option.value);
       opt.textContent = option.label;
-      if(String(option.value) === String(value)){
-        opt.selected = true;
-      }
       input.appendChild(opt);
     }
+    const fallback = param.options && param.options.length ? param.options[0].value : '';
+    input.value = String(value != null ? value : fallback);
   }else if(param.type === 'checkbox'){
     input = document.createElement('input');
     input.type = 'checkbox';
@@ -938,17 +905,18 @@ function createAlgorithmParamInput(def, param, defaultValue){
     if(param.min != null) input.min = String(param.min);
     if(param.max != null) input.max = String(param.max);
     if(param.step != null) input.step = String(param.step);
-    input.value = String(value != null ? value : param.min || 0);
+    const numValue = Number.isFinite(Number(value)) ? Number(value) : Number(param.min || 0);
+    input.value = String(numValue);
     display = document.createElement('span');
-    display.className = 'algorithm-value';
-    display.textContent = formatAlgorithmDisplayValue(param, Number(input.value));
+    display.className = 'range-display';
+    display.textContent = formatAdvancedDisplayValue(param, numValue);
   }else{
     input = document.createElement('input');
     input.type = param.type === 'number' ? 'number' : 'text';
     if(param.min != null) input.min = String(param.min);
     if(param.max != null) input.max = String(param.max);
     if(param.step != null) input.step = String(param.step);
-    let initial = value != null ? value : '';
+    let initial = value;
     if(param.key === 'palette' && Array.isArray(value)){
       initial = stringifyPalette(value);
     }else if(param.key === 'angles' && Array.isArray(value)){
@@ -956,32 +924,44 @@ function createAlgorithmParamInput(def, param, defaultValue){
     }
     input.value = initial != null ? String(initial) : '';
   }
-  input.dataset.algoKey = param.key;
-  const updateFn = () => {
-    const settings = state.algorithmSettings[def.id];
-    if(param.type === 'checkbox'){
-      settings.params[param.key] = input.checked;
-    }else if(param.type === 'select'){
-      const selected = input.value;
-      const numeric = Number(selected);
-      settings.params[param.key] = Number.isNaN(numeric) ? selected : numeric;
-    }else if(param.type === 'range' || param.type === 'number'){
-      const num = Number(input.value);
-      settings.params[param.key] = Number.isFinite(num) ? num : (settings.params[param.key] || 0);
-      if(display){
-        display.textContent = formatAlgorithmDisplayValue(param, settings.params[param.key]);
-      }
-    }else{
-      settings.params[param.key] = input.value;
-    }
-    handleAlgorithmChange();
-  };
   const eventType = param.type === 'checkbox' || param.type === 'select' ? 'change' : 'input';
-  input.addEventListener(eventType, updateFn);
+  input.addEventListener(eventType, () => handleAdvancedDitherParamChange(def, param, input, display));
   return { input, display };
 }
 
-function formatAlgorithmDisplayValue(param, value){
+function handleAdvancedDitherParamChange(def, param, input, display){
+  const settings = state.advancedDitherSettings[def.id];
+  if(!settings) return;
+  let value;
+  if(param.type === 'checkbox'){
+    value = Boolean(input.checked);
+  }else if(param.type === 'select'){
+    const selected = input.value;
+    const numeric = Number(selected);
+    value = Number.isNaN(numeric) ? selected : numeric;
+  }else if(param.key === 'palette'){
+    value = parsePaletteValue(input.value, def.defaults && def.defaults.palette);
+    input.value = stringifyPalette(value);
+  }else if(param.key === 'angles'){
+    value = parseAnglesValue(input.value, def.defaults && def.defaults.angles);
+    input.value = value.join(',');
+  }else if(param.type === 'range' || param.type === 'number'){
+    const num = Number(input.value);
+    const fallback = Number(param.min || 0);
+    value = Number.isFinite(num) ? num : fallback;
+    input.value = String(value);
+  }else{
+    value = input.value;
+  }
+  settings.params[param.key] = value;
+  if(display){
+    const numeric = Number(value);
+    display.textContent = formatAdvancedDisplayValue(param, Number.isFinite(numeric) ? numeric : Number(input.value));
+  }
+  fastRender(true);
+}
+
+function formatAdvancedDisplayValue(param, value){
   if(typeof value !== 'number' || Number.isNaN(value)){
     return '';
   }
@@ -990,21 +970,30 @@ function formatAlgorithmDisplayValue(param, value){
   return value.toFixed(decimals);
 }
 
-function setAlgorithmControlsEnabled(id, enabled){
-  const refs = state.algorithmControls.get(id);
-  if(!refs) return;
-  refs.root.classList.toggle('is-enabled', enabled);
-  if(refs.checkbox){
-    refs.checkbox.checked = enabled;
+function cloneAdvancedDefaults(defaults){
+  if(!defaults) return {};
+  return JSON.parse(JSON.stringify(defaults));
+}
+
+function updateAdvancedDitherVisibility(){
+  const panel = $('ditherAdvancedPanel');
+  const mode = controls.dither ? controls.dither.value : 'none';
+  const def = getAdvancedDitherDefinition(mode);
+  if(!panel){
+    return;
   }
-  for(const [, ref] of refs.params){
-    ref.input.disabled = !enabled;
+  panel.hidden = !def;
+  for(const [id, refs] of state.advancedDitherControls){
+    refs.root.hidden = !def || def.id !== id;
+  }
+  if(def){
+    syncAdvancedDitherControls(def.id);
   }
 }
 
-function syncAlgorithmControlValues(id){
-  const refs = state.algorithmControls.get(id);
-  const settings = state.algorithmSettings[id];
+function syncAdvancedDitherControls(id){
+  const refs = state.advancedDitherControls.get(id);
+  const settings = state.advancedDitherSettings[id];
   if(!refs || !settings) return;
   for(const [key, ref] of refs.params){
     const paramDef = ref.definition;
@@ -1013,99 +1002,84 @@ function syncAlgorithmControlValues(id){
       ref.input.checked = Boolean(value);
     }else if(paramDef.type === 'select'){
       ref.input.value = String(value);
+    }else if(paramDef.key === 'palette'){
+      ref.input.value = stringifyPalette(value);
+    }else if(paramDef.key === 'angles'){
+      ref.input.value = Array.isArray(value) ? value.join(',') : '';
     }else{
-      let val = value != null ? value : '';
-      if(paramDef.key === 'palette' && Array.isArray(value)){
-        val = stringifyPalette(value);
-      }else if(paramDef.key === 'angles' && Array.isArray(value)){
-        val = value.join(',');
-      }
-      ref.input.value = String(val);
-      if(ref.display && typeof value === 'number'){
-        ref.display.textContent = formatAlgorithmDisplayValue(paramDef, Number(value));
-      }
+      ref.input.value = value != null ? String(value) : '';
+    }
+    if(ref.display){
+      const numeric = Number(ref.input.value);
+      ref.display.textContent = formatAdvancedDisplayValue(paramDef, Number.isFinite(numeric) ? numeric : 0);
     }
   }
-  setAlgorithmControlsEnabled(id, settings.enabled);
 }
 
-function bindAlgorithmPresetButtons(){
-  const saveBtn = $('algoPresetSave');
-  if(saveBtn){
-    saveBtn.addEventListener('click', exportAlgorithmPreset);
-  }
-  const loadBtn = $('algoPresetLoad');
-  if(loadBtn){
-    loadBtn.addEventListener('click', importAlgorithmPreset);
-  }
+function getAdvancedDitherDefinition(id){
+  return ADVANCED_DITHER_DEFS.find((def) => def.id === id);
 }
 
-function bindAlgorithmHotkeys(){
-  document.addEventListener('keydown', (event) => {
-    if(event.defaultPrevented) return;
-    if(event.metaKey || event.ctrlKey || event.altKey) return;
-    const target = event.target;
-    if(target && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)){
-      return;
-    }
-    const key = event.key ? event.key.toLowerCase() : '';
-    if(!key) return;
-    const effectId = state.algorithmHotkeys.get(key);
-    if(!effectId) return;
-    event.preventDefault();
-    toggleAlgorithm(effectId);
-  });
-}
-
-function toggleAlgorithm(id){
-  const settings = state.algorithmSettings[id];
-  if(!settings) return;
-  settings.enabled = !settings.enabled;
-  syncAlgorithmControlValues(id);
-  handleAlgorithmChange();
-}
-
-function handleAlgorithmChange(){
-  fastRender(true);
-}
-
-function cloneAlgorithmDefaults(defaults){
-  if(!defaults) return {};
-  return JSON.parse(JSON.stringify(defaults));
-}
-
-function buildAlgorithmChain(){
-  const effects = [];
-  for(const def of ALGORITHM_DEFS){
-    const settings = state.algorithmSettings[def.id];
-    if(!settings || !settings.enabled) continue;
-    const params = prepareAlgorithmParams(def, settings.params);
-    effects.push({ name: def.id, params });
-  }
-  return effects;
-}
-
-function prepareAlgorithmParams(def, params){
+function prepareAdvancedDitherParams(def, params){
   const output = {};
   for(const param of def.params || []){
     const value = params[param.key];
     if(param.type === 'checkbox'){
       output[param.key] = Boolean(value);
-    }else if(param.type === 'select'){
-      const numeric = Number(value);
-      output[param.key] = Number.isNaN(numeric) ? value : numeric;
-    }else if(param.type === 'range' || param.type === 'number'){
-      const num = Number(value);
-      output[param.key] = Number.isFinite(num) ? num : Number(param.min || 0);
     }else if(param.key === 'palette'){
       output[param.key] = parsePaletteValue(value, def.defaults && def.defaults.palette);
     }else if(param.key === 'angles'){
       output[param.key] = parseAnglesValue(value, def.defaults && def.defaults.angles);
+    }else if(param.type === 'range' || param.type === 'number'){
+      const num = Number(value);
+      output[param.key] = Number.isFinite(num) ? num : Number(param.min || 0);
+    }else if(param.type === 'select'){
+      if(typeof value === 'string'){
+        const numeric = Number(value);
+        output[param.key] = Number.isNaN(numeric) ? value : numeric;
+      }else{
+        output[param.key] = value;
+      }
     }else{
       output[param.key] = value;
     }
   }
   return output;
+}
+
+function buildAdvancedDitherChain(){
+  const mode = controls.dither ? controls.dither.value : 'none';
+  const def = getAdvancedDitherDefinition(mode);
+  if(!def) return [];
+  const settings = state.advancedDitherSettings[def.id];
+  if(!settings) return [];
+  const params = prepareAdvancedDitherParams(def, settings.params);
+  return [{ name: def.id, params }];
+}
+
+async function applyAdvancedDitherToCanvas(canvas, { preview = false } = {}){
+  if(!canvas) return;
+  const effects = buildAdvancedDitherChain();
+  if(!effects.length) return;
+  try{
+    await applyToCanvas(canvas, effects, { preview, maxDimension: preview ? 1024 : undefined });
+  }catch(err){
+    console.warn('[dither] applicazione avanzata fallita', err);
+  }
+}
+
+function scheduleAdvancedDitherPreview(canvas){
+  state.advancedDitherActiveCanvas = canvas || null;
+  const effects = buildAdvancedDitherChain();
+  if(!effects.length || !canvas) return;
+  requestAnimationFrame(() => {
+    if(state.advancedDitherActiveCanvas !== canvas) return;
+    applyAdvancedDitherToCanvas(canvas, { preview: true });
+  });
+}
+
+function isAdvancedDitherMode(mode){
+  return Boolean(getAdvancedDitherDefinition(mode));
 }
 
 function parsePaletteValue(value, fallback){
@@ -1156,97 +1130,6 @@ function parseAnglesValue(value, fallback){
   }
   const parts = value.split(/[;,]+/).map((part) => Number(part.trim())).filter((num) => Number.isFinite(num));
   return parts.length ? parts : (Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135]);
-}
-
-async function applyAlgorithmsToCanvas(canvas, { preview = false } = {}){
-  if(!canvas) return;
-  const effects = buildAlgorithmChain();
-  if(!effects.length) return;
-  try{
-    await applyToCanvas(canvas, effects, { preview, maxDimension: preview ? 1024 : undefined });
-  }catch(err){
-    console.warn('[algorithms] applicazione fallita', err);
-  }
-}
-
-function scheduleAlgorithmPreview(canvas){
-  state.algorithmActiveCanvas = canvas || null;
-  const effects = buildAlgorithmChain();
-  if(!effects.length || !canvas) return;
-  requestAnimationFrame(() => {
-    applyAlgorithmsToCanvas(canvas, { preview: true });
-  });
-}
-
-function exportAlgorithmPreset(){
-  const payload = {};
-  for(const def of ALGORITHM_DEFS){
-    const settings = state.algorithmSettings[def.id];
-    if(!settings) continue;
-    payload[def.id] = {
-      enabled: settings.enabled,
-      params: cloneAlgorithmDefaults(settings.params)
-    };
-  }
-  const json = JSON.stringify(payload, null, 2);
-  if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(json).then(() => {
-      console.log('Preset copiato negli appunti');
-    }).catch(() => {
-      window.prompt('Preset algoritmi', json);
-    });
-  }else{
-    window.prompt('Preset algoritmi', json);
-  }
-}
-
-function importAlgorithmPreset(){
-  const raw = window.prompt('Incolla il preset algoritmi');
-  if(!raw) return;
-  let parsed;
-  try{
-    parsed = JSON.parse(raw);
-  }catch(err){
-    alert('Preset non valido');
-    return;
-  }
-  for(const def of ALGORITHM_DEFS){
-    const entry = parsed ? parsed[def.id] : null;
-    if(!entry) continue;
-    const settings = state.algorithmSettings[def.id];
-    if(!settings) continue;
-    settings.enabled = Boolean(entry.enabled);
-    settings.params = normalizeAlgorithmParams(def, entry.params || {});
-    syncAlgorithmControlValues(def.id);
-  }
-  handleAlgorithmChange();
-}
-
-function normalizeAlgorithmParams(def, params){
-  const clone = cloneAlgorithmDefaults(def.defaults || {});
-  if(!params) return clone;
-  for(const param of def.params || []){
-    const value = params[param.key];
-    if(value === undefined) continue;
-    if(param.type === 'checkbox'){
-      clone[param.key] = Boolean(value);
-    }else if(param.type === 'select'){
-      const numeric = Number(value);
-      clone[param.key] = Number.isNaN(numeric) ? value : numeric;
-    }else if(param.type === 'range' || param.type === 'number'){
-      const num = Number(value);
-      if(Number.isFinite(num)){
-        clone[param.key] = num;
-      }
-    }else if(param.key === 'palette'){
-      clone[param.key] = Array.isArray(value) ? value : parsePaletteValue(String(value), def.defaults && def.defaults.palette);
-    }else if(param.key === 'angles'){
-      clone[param.key] = Array.isArray(value) ? value : parseAnglesValue(String(value), def.defaults && def.defaults.angles);
-    }else{
-      clone[param.key] = value;
-    }
-  }
-  return clone;
 }
 
 function beginUpload(name=''){
@@ -1838,7 +1721,7 @@ function buildWorkerOptions(options){
     contrast: options.con,
     style: options.style,
     thickness: options.thick,
-    dither: options.mode,
+    dither: isAdvancedDitherMode(options.mode) ? 'none' : options.mode,
     invertMode: options.invertMode,
     asciiCustom: options.asciiCustom,
     asciiWord: options.asciiWord
@@ -2628,6 +2511,7 @@ function drawAnimationFrame(player, index){
     glow: player.data.glow
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
+  scheduleAdvancedDitherPreview(player.canvas);
 }
 
 function renderPreview(previewData, scale){
@@ -2655,7 +2539,7 @@ function renderPreview(previewData, scale){
     canvas.style.height = `${cssHeight}px`;
     canvas.style.imageRendering = 'pixelated';
     frame.appendChild(canvas);
-    scheduleAlgorithmPreview(canvas);
+    scheduleAdvancedDitherPreview(canvas);
     updatePlaybackButton(false);
   }else if(previewData.type === 'animation'){
     const canvas = document.createElement('canvas');
@@ -3154,7 +3038,7 @@ async function downloadRaster(format){
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
   const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
-  await applyAlgorithmsToCanvas(canvas, { preview: false });
+  await applyAdvancedDitherToCanvas(canvas, { preview: false });
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
@@ -3165,7 +3049,10 @@ async function downloadGIF(){
   const options = collectRenderOptions();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
-  const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
+  const indexedFrames = [];
+  for(const frame of exportData.frames){
+    indexedFrames.push(await frameToIndexedFrame(frame, dims.width, dims.height, options));
+  }
   if(!indexedFrames.length){
     throw new Error('Nessun frame disponibile per la GIF');
   }
@@ -3228,6 +3115,7 @@ async function downloadMP4(){
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, dims.width, dims.height);
     paintFrame(ctx, frameData, dims.width, dims.height);
+    await applyAdvancedDitherToCanvas(canvas, { preview: false });
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
   }
@@ -3387,7 +3275,7 @@ function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
   return binary;
 }
 
-function frameToIndexedFrame(frame, outWidth, outHeight, options){
+async function frameToIndexedFrame(frame, outWidth, outHeight, options){
   if(!frame){
     return {
       indexes: new Uint8Array(Math.max(1, Math.round(outWidth || 1)) * Math.max(1, Math.round(outHeight || 1))),
@@ -3395,15 +3283,45 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
       transparentIndex: 0
     };
   }
-  const tile = frame.tile != null ? frame.tile : options.px;
+  const tile = frame.tile != null ? frame.tile : (options && options.px != null ? options.px : 1);
+  const width = Math.max(1, Math.round(outWidth || frame.outputWidth || (frame.gridWidth * tile) || 1));
+  const height = Math.max(1, Math.round(outHeight || frame.outputHeight || (frame.gridHeight * tile) || 1));
+  if(buildAdvancedDitherChain().length){
+    const canvas = createExportCanvas(width, height, {forceDOM: true});
+    const ctx = canvas.getContext('2d', {alpha: options && options.bg === 'transparent'});
+    if(ctx){
+      const frameData = {
+        ...frame,
+        type: frame.kind,
+        bg: options && options.bg != null ? options.bg : 'transparent',
+        fg: options && options.fg != null ? options.fg : '#000000',
+        glow: options && options.glow != null ? options.glow : 0
+      };
+      paintFrame(ctx, frameData, width, height);
+      await applyAdvancedDitherToCanvas(canvas, { preview: false });
+      let imageData = null;
+      try{
+        imageData = ctx.getImageData(0, 0, width, height);
+      }catch(err){
+        imageData = null;
+      }
+      if(imageData){
+        const samples = [];
+        const hasTrans = collectGifColorSamples(imageData, samples, options && options.bg === 'transparent');
+        const paletteInfo = buildGifPalette(samples, hasTrans);
+        const indexes = imageDataToPaletteIndexes(imageData, paletteInfo.palette, paletteInfo.transparentIndex);
+        return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+      }
+    }
+  }
   if(frame.kind === 'thermal'){
     const palette = ensureUint8Array(frame.palette) || getPaletteByKey(frame.paletteKey) || THERMAL_PALETTE;
     const indexes = resamplePaletteFrame(
       ensureUint8Array(frame.indexes),
       frame.gridWidth,
       frame.gridHeight,
-      outWidth,
-      outHeight,
+      width,
+      height,
       tile
     );
     return {indexes, palette, transparentIndex: -1, paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined)};
@@ -3411,17 +3329,17 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
   if(frame.kind === 'ascii'){
     const hasColors = frame.colors && frame.colors.length;
     const asciiOverrides = hasColors
-      ? { bg: options.bg != null ? options.bg : 'transparent', fg: options.fg, glow: 0 }
+      ? { bg: options && options.bg != null ? options.bg : 'transparent', fg: options && options.fg, glow: 0 }
       : { bg: 'transparent', fg: '#ffffff', glow: 0 };
-    const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, asciiOverrides);
+    const imageData = renderAsciiFrameImageData(frame, width, height, options, asciiOverrides);
     if(!imageData){
-      const fallbackIndexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
-      const fallbackPalette = buildBinaryPalette(options.bg, options.fg);
+      const fallbackIndexes = asciiFrameToBinaryFrame(frame, width, height, options);
+      const fallbackPalette = buildBinaryPalette(options && options.bg, options && options.fg);
       return {indexes: fallbackIndexes, palette: fallbackPalette.palette, transparentIndex: fallbackPalette.transparentIndex};
     }
     if(hasColors){
       const samples = [];
-      const hasTrans = collectGifColorSamples(imageData, samples, options.bg === 'transparent');
+      const hasTrans = collectGifColorSamples(imageData, samples, options && options.bg === 'transparent');
       const paletteInfo = buildGifPalette(samples, hasTrans);
       const palette = paletteInfo.palette;
       const transparentIndex = paletteInfo.transparentIndex;
@@ -3433,18 +3351,18 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
     for(let i=0, p=0;i<pixels.length;i+=4,p++){
       binary[p] = pixels[i+3] > 32 ? 1 : 0;
     }
-    const paletteInfo = buildBinaryPalette(options.bg, options.fg);
+    const paletteInfo = buildBinaryPalette(options && options.bg, options && options.fg);
     return {indexes: binary, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
   }
   const indexes = maskToBinaryFrame(
     frame.mask,
     frame.gridWidth,
     frame.gridHeight,
-    outWidth,
-    outHeight,
+    width,
+    height,
     tile
   );
-  const paletteInfo = buildBinaryPalette(options.bg, options.fg);
+  const paletteInfo = buildBinaryPalette(options && options.bg, options && options.fg);
   return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
 }
 
