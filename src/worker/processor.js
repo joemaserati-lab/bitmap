@@ -191,6 +191,7 @@ function handleProcess({jobId, options}){
     const result = processImage(options||{});
     const transfers = [];
     if(result.mask) transfers.push(result.mask.buffer);
+    if(result.tonal) transfers.push(result.tonal.buffer);
     if(result.indexes) transfers.push(result.indexes.buffer);
     if(result.palette) transfers.push(result.palette.buffer);
     if(result.ascii) transfers.push(result.ascii.buffer);
@@ -290,6 +291,56 @@ function processImage(options){
       payload.lines = ascii.lines;
     }
     return payload;
+  }
+
+  if(dither === 'advanced_base'){
+    const thrRaw = typeof options.threshold === 'number' ? options.threshold : parseFloat(options.threshold);
+    const thr = Math.max(0, Math.min(255, Number.isFinite(thrRaw) ? thrRaw : 128));
+    const tonalOut = new Uint8Array(total);
+    const bias = Math.round(128 - thr);
+    const colorSource = ensureColorGrid(baseWidth, baseHeight);
+    const colorOut = colorSource ? new Uint8Array(colorSource.length) : null;
+    for(let i=0;i<total;i++){
+      const baseTone = tonal[i];
+      let tone = invert ? (255 - baseTone) : baseTone;
+      tone = clamp255(Math.round(tone + bias));
+      tonalOut[i] = tone;
+      if(colorOut && colorSource){
+        const offset = i*3;
+        let r = colorSource[offset];
+        let g = colorSource[offset + 1];
+        let b = colorSource[offset + 2];
+        r = tonalLUT[r];
+        g = tonalLUT[g];
+        b = tonalLUT[b];
+        if(invert){
+          r = 255 - r;
+          g = 255 - g;
+          b = 255 - b;
+        }
+        r = clamp255(r + bias);
+        g = clamp255(g + bias);
+        b = clamp255(b + bias);
+        colorOut[offset] = r;
+        colorOut[offset + 1] = g;
+        colorOut[offset + 2] = b;
+      }
+    }
+    return {
+      kind: 'advanced-base',
+      gridWidth: baseWidth,
+      gridHeight: baseHeight,
+      tile: pixelSize,
+      tonal: tonalOut,
+      colors: colorOut,
+      threshold: thr,
+      invert,
+      outputWidth: Math.round(baseWidth*pixelSize),
+      outputHeight: Math.round(baseHeight*pixelSize),
+      aspectWidth: sourceWidth,
+      aspectHeight: sourceHeight,
+      mode: options.mode || 'advanced-base'
+    };
   }
 
   if(dither === 'thermal'){

@@ -1054,7 +1054,22 @@ function buildAdvancedDitherChain(){
   const settings = state.advancedDitherSettings[def.id];
   if(!settings) return [];
   const params = prepareAdvancedDitherParams(def, settings.params);
-  return [{ name: def.id, params }];
+  const base = collectRenderOptions();
+  const globals = {
+    pixelSize: base.px,
+    threshold: base.thr,
+    blur: base.blurPx,
+    grain: base.grain,
+    blackPoint: base.bp,
+    whitePoint: base.wp,
+    gamma: base.gam,
+    brightness: base.bri,
+    contrast: base.con,
+    invertMode: base.invertMode,
+    background: base.bg,
+    foreground: base.fg
+  };
+  return [{ name: def.id, params: { ...params, _globals: globals } }];
 }
 
 async function applyAdvancedDitherToCanvas(canvas, { preview = false } = {}){
@@ -1709,6 +1724,7 @@ function collectRenderOptions(){
 }
 
 function buildWorkerOptions(options){
+  const advanced = isAdvancedDitherMode(options.mode);
   return {
     pixelSize: options.px,
     threshold: options.thr,
@@ -1721,10 +1737,12 @@ function buildWorkerOptions(options){
     contrast: options.con,
     style: options.style,
     thickness: options.thick,
-    dither: isAdvancedDitherMode(options.mode) ? 'none' : options.mode,
+    dither: advanced ? 'advanced_base' : options.mode,
     invertMode: options.invertMode,
     asciiCustom: options.asciiCustom,
-    asciiWord: options.asciiWord
+    asciiWord: options.asciiWord,
+    mode: options.mode,
+    advanced
   };
 }
 
@@ -2038,6 +2056,26 @@ function createFrameData(result, options){
       mode: result.mode || options.mode || 'thermal'
     };
   }
+  if(kind === 'advanced-base'){
+    const tonal = ensureUint8Array(result.tonal);
+    const colors = ensureUint8Array(result.colors);
+    return {
+      kind: 'advanced-base',
+      gridWidth: result.gridWidth,
+      gridHeight: result.gridHeight,
+      tile,
+      tonal,
+      colors,
+      threshold: result.threshold != null ? result.threshold : options.thr,
+      invert: !!result.invert,
+      outputWidth: adjusted.width,
+      outputHeight: adjusted.height,
+      aspectWidth,
+      aspectHeight,
+      aspectRatio: adjusted.ratio,
+      mode: result.mode || options.mode || 'advanced-base'
+    };
+  }
   return {
     kind: 'mask',
     gridWidth: result.gridWidth,
@@ -2088,6 +2126,24 @@ function buildPreviewData(frame, options){
       indexes: frame.indexes,
       palette,
       paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined),
+      bg: options.bg,
+      fg: options.fg,
+      glow: options.glow
+    };
+  }
+  if(frame.kind === 'advanced-base'){
+    return {
+      type: 'advanced-base',
+      mode: frame.mode,
+      width: frame.outputWidth,
+      height: frame.outputHeight,
+      gridWidth: frame.gridWidth,
+      gridHeight: frame.gridHeight,
+      tile: frame.tile,
+      tonal: frame.tonal,
+      colors: frame.colors,
+      threshold: frame.threshold,
+      invert: frame.invert,
       bg: options.bg,
       fg: options.fg,
       glow: options.glow
@@ -2390,6 +2446,9 @@ function buildExportSVG(result, options){
   if(frame.kind === 'thermal'){
     return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg, frame.paletteKey);
   }
+  if(frame.kind === 'advanced-base'){
+    return buildAdvancedBaseSVG(frame, tile, options);
+  }
   return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
 }
 
@@ -2402,6 +2461,47 @@ function buildMaskPathData(mask, width, height, tile){
     path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(tile)}h-${formatNumber(rectWidth)}z`;
   });
   return path;
+}
+
+function buildAdvancedBaseSVG(frame, tile, options){
+  const width = Math.max(1, frame.gridWidth || 0);
+  const height = Math.max(1, frame.gridHeight || 0);
+  const unit = tile || 1;
+  const svgW = Math.max(1, Math.round(width * unit));
+  const svgH = Math.max(1, Math.round(height * unit));
+  const tonal = frame.tonal ? ensureUint8Array(frame.tonal) : null;
+  const colors = frame.colors ? ensureUint8Array(frame.colors) : null;
+  const hasColors = colors && colors.length >= width * height * 3;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  const bg = options.bg;
+  if(bg && bg !== 'transparent'){
+    svg += `<rect width="100%" height="100%" fill="${escapeXML(bg)}"/>`;
+  }
+  const stepX = unit;
+  const stepY = unit;
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      const idx = y * width + x;
+      let fill = '';
+      if(hasColors){
+        const base = idx * 3;
+        const r = colors[base];
+        const g = colors[base + 1];
+        const b = colors[base + 2];
+        fill = `rgb(${r},${g},${b})`;
+      }else if(tonal && tonal.length > idx){
+        const tone = tonal[idx];
+        fill = `rgb(${tone},${tone},${tone})`;
+      }else{
+        continue;
+      }
+      const rectX = x * stepX;
+      const rectY = y * stepY;
+      svg += `<rect x="${formatNumber(rectX)}" y="${formatNumber(rectY)}" width="${formatNumber(stepX)}" height="${formatNumber(stepY)}" fill="${fill}"/>`;
+    }
+  }
+  svg += '</svg>';
+  return svg;
 }
 
 function formatNumber(value){
@@ -2528,7 +2628,7 @@ function renderPreview(previewData, scale){
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
   const dpr = Math.max(1, window.devicePixelRatio || 1);
-  if(previewData.type === 'mask' || previewData.type === 'ascii' || previewData.type === 'thermal'){
+  if(previewData.type === 'mask' || previewData.type === 'ascii' || previewData.type === 'thermal' || previewData.type === 'advanced-base'){
     const canvas = document.createElement('canvas');
     const cssWidth = Math.max(1, dims.width);
     const cssHeight = Math.max(1, dims.height);
@@ -2566,6 +2666,8 @@ function paintFrame(ctx, data, outWidth, outHeight){
     paintAscii(ctx, data, outWidth, outHeight);
   }else if(type === 'thermal'){
     paintThermal(ctx, data, outWidth, outHeight);
+  }else if(type === 'advanced-base'){
+    paintAdvancedBase(ctx, data, outWidth, outHeight);
   }else{
     paintMask(ctx, data, outWidth, outHeight);
   }
@@ -2674,6 +2776,55 @@ function paintThermal(ctx, data, outWidth, outHeight){
       ctx.fillStyle = color;
       const drawX = x * cellWidth;
       ctx.fillRect(drawX, drawY, cellWidth, cellHeight);
+    }
+  }
+  ctx.restore();
+}
+
+function paintAdvancedBase(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const gridWidth = Math.max(1, data.gridWidth || 0);
+  const gridHeight = Math.max(1, data.gridHeight || 0);
+  const tile = data.tile != null ? data.tile : 1;
+  const tonal = data.tonal ? ensureUint8Array(data.tonal) : null;
+  const colors = data.colors ? ensureUint8Array(data.colors) : null;
+  if((!tonal || tonal.length < gridWidth * gridHeight) && (!colors || colors.length < gridWidth * gridHeight * 3)){
+    ctx.restore();
+    return;
+  }
+  const baseWidth = gridWidth * tile;
+  const baseHeight = gridHeight * tile;
+  const scaleX = baseWidth ? outWidth / baseWidth : 1;
+  const scaleY = baseHeight ? outHeight / baseHeight : 1;
+  for(let y=0;y<gridHeight;y++){
+    const rowOffset = y * gridWidth;
+    const drawY = y * tile * scaleY;
+    for(let x=0;x<gridWidth;x++){
+      const idx = rowOffset + x;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      if(colors && colors.length >= (idx * 3 + 3)){
+        const base = idx * 3;
+        r = colors[base];
+        g = colors[base + 1];
+        b = colors[base + 2];
+      }else if(tonal && tonal.length > idx){
+        const tone = tonal[idx];
+        r = g = b = tone;
+      }
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      const drawX = x * tile * scaleX;
+      ctx.fillRect(drawX, drawY, tile * scaleX, tile * scaleY);
     }
   }
   ctx.restore();
