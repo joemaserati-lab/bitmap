@@ -1,5 +1,6 @@
 import { applyToCanvas } from './postfx.js';
 import { ensureEffect } from './effects/index.js';
+import { computeExportBaseSize } from './exportSizing.mjs';
 
 const $ = (id) => document.getElementById(id);
 
@@ -48,6 +49,141 @@ const ASCII_CHARSETS = {
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@'],
   ascii_word: [' ','P','I','X','E','L']
 };
+
+const ALGORITHM_DEFS = [
+  {
+    id: 'blueNoise',
+    label: 'Blue Noise',
+    hotkey: 'b',
+    defaults: { scale: 1, contrast: 1, bias: 0 },
+    params: [
+      { key: 'scale', type: 'range', min: 0.25, max: 4, step: 0.25, label: 'Scala' },
+      { key: 'contrast', type: 'range', min: 0.2, max: 3, step: 0.1, label: 'Contrasto' },
+      { key: 'bias', type: 'number', min: -128, max: 128, step: 1, label: 'Bias' }
+    ]
+  },
+  {
+    id: 'clusteredDot',
+    label: 'Clustered Dot',
+    hotkey: 'c',
+    defaults: { size: 8, angle: 45, gain: 1 },
+    params: [
+      { key: 'size', type: 'select', options: [{ value: 4, label: '4×4' }, { value: 8, label: '8×8' }], label: 'Dimensione' },
+      { key: 'angle', type: 'number', min: 0, max: 180, step: 1, label: 'Angolo' },
+      { key: 'gain', type: 'range', min: 0.5, max: 2.5, step: 0.1, label: 'Gain' }
+    ]
+  },
+  {
+    id: 'dotDiffusion',
+    label: 'Dot Diffusion',
+    defaults: { classMask: 'knuth', strength: 1 },
+    params: [
+      { key: 'classMask', type: 'select', options: [{ value: 'knuth', label: 'Knuth' }, { value: 'ulichney', label: 'Ulichney' }], label: 'Maschera' },
+      { key: 'strength', type: 'range', min: 0.2, max: 2, step: 0.1, label: 'Forza' }
+    ]
+  },
+  {
+    id: 'edKernels',
+    label: 'Error Diffusion+',
+    defaults: { kernel: 'sierraLite', serpentine: true, clip: true, gain: 1 },
+    params: [
+      { key: 'kernel', type: 'select', options: [
+        { value: 'sierraLite', label: 'Sierra Lite' },
+        { value: 'twoRowSierra', label: 'Two-Row Sierra' },
+        { value: 'stevensonArce', label: 'Stevenson-Arce' },
+        { value: 'shiauFan', label: 'Shiau-Fan' }
+      ], label: 'Kernel' },
+      { key: 'serpentine', type: 'checkbox', label: 'Serpentine' },
+      { key: 'clip', type: 'checkbox', label: 'Clipping' },
+      { key: 'gain', type: 'range', min: 0.2, max: 2, step: 0.1, label: 'Gain' }
+    ]
+  },
+  {
+    id: 'paletteDither',
+    label: 'Palette Dither',
+    hotkey: 'p',
+    defaults: { palette: [[0, 0, 0], [255, 255, 255]], diffusion: true, strength: 1 },
+    params: [
+      { key: 'palette', type: 'text', label: 'Palette (hex)', placeholder: '#000000,#ffffff' },
+      { key: 'diffusion', type: 'checkbox', label: 'Diffusione errore' },
+      { key: 'strength', type: 'range', min: 0, max: 1, step: 0.05, label: 'Forza' }
+    ]
+  },
+  {
+    id: 'autoQuant',
+    label: 'Auto Quant',
+    defaults: { colors: 8, diffusion: false },
+    params: [
+      { key: 'colors', type: 'number', min: 2, max: 32, step: 1, label: 'Colori' },
+      { key: 'diffusion', type: 'checkbox', label: 'Diffusione' }
+    ]
+  },
+  {
+    id: 'cmykHalftone',
+    label: 'CMYK Halftone',
+    hotkey: 'h',
+    defaults: { dotScale: 1, ucr: 0.2 },
+    params: [
+      { key: 'dotScale', type: 'range', min: 0.5, max: 3, step: 0.1, label: 'Scala punto' },
+      { key: 'ucr', type: 'range', min: 0, max: 1, step: 0.05, label: 'UCR' }
+    ]
+  },
+  {
+    id: 'halftoneShapes',
+    label: 'Halftone Shapes',
+    defaults: { shape: 'circle', angle: 45, minSize: 0.1, maxSize: 0.6, jitter: 0.1, seed: 1337 },
+    params: [
+      { key: 'shape', type: 'select', options: [
+        { value: 'circle', label: 'Cerchio' },
+        { value: 'square', label: 'Quadrato' },
+        { value: 'diamond', label: 'Diamante' },
+        { value: 'triangle', label: 'Triangolo' },
+        { value: 'hex', label: 'Esagono' }
+      ], label: 'Forma' },
+      { key: 'angle', type: 'number', min: 0, max: 180, step: 1, label: 'Angolo' },
+      { key: 'minSize', type: 'number', min: 0.05, max: 1, step: 0.05, label: 'Min' },
+      { key: 'maxSize', type: 'number', min: 0.1, max: 1.5, step: 0.05, label: 'Max' },
+      { key: 'jitter', type: 'range', min: 0, max: 0.5, step: 0.05, label: 'Jitter' },
+      { key: 'seed', type: 'number', min: 0, max: 9999, step: 1, label: 'Seed' }
+    ]
+  },
+  {
+    id: 'lineDither',
+    label: 'Line Dither',
+    hotkey: 'l',
+    defaults: { cell: 8, angle: 0, thickness: 0.5, aa: true },
+    params: [
+      { key: 'cell', type: 'number', min: 2, max: 64, step: 1, label: 'Cella' },
+      { key: 'angle', type: 'number', min: 0, max: 180, step: 1, label: 'Angolo' },
+      { key: 'thickness', type: 'range', min: 0.1, max: 1, step: 0.05, label: 'Spessore' },
+      { key: 'aa', type: 'checkbox', label: 'Antialias' }
+    ]
+  },
+  {
+    id: 'hatching',
+    label: 'Hatching',
+    hotkey: 'x',
+    defaults: { levels: 5, angles: [0, 45, 90, 135], densityCurve: 'linear' },
+    params: [
+      { key: 'levels', type: 'number', min: 1, max: 8, step: 1, label: 'Livelli' },
+      { key: 'angles', type: 'text', label: 'Angoli (°)', placeholder: '0,45,90,135' },
+      { key: 'densityCurve', type: 'select', options: [
+        { value: 'linear', label: 'Lineare' },
+        { value: 'ease', label: 'Ease' }
+      ], label: 'Curva densità' }
+    ]
+  },
+  {
+    id: 'stippling',
+    label: 'Stippling',
+    defaults: { minR: 1, maxR: 3, density: 1 },
+    params: [
+      { key: 'minR', type: 'number', min: 0.5, max: 6, step: 0.1, label: 'Raggio minimo' },
+      { key: 'maxR', type: 'number', min: 1, max: 8, step: 0.1, label: 'Raggio massimo' },
+      { key: 'density', type: 'number', min: 0.1, max: 4, step: 0.1, label: 'Densità' }
+    ]
+  }
+];
 
 function clamp01(value){
   const num = Number(value);
@@ -173,7 +309,11 @@ const state = {
   videoSource: null,
   previewPlayer: null,
   customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM),
-  asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD)
+  asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD),
+  algorithmSettings: {},
+  algorithmControls: new Map(),
+  algorithmHotkeys: new Map(),
+  algorithmActiveCanvas: null
 };
 
 let renderQueued = false;
@@ -190,6 +330,9 @@ function init(){
   bindDropzone();
   bindExportModal();
   bindPlaybackControl();
+  initAlgorithmUI();
+  bindAlgorithmPresetButtons();
+  bindAlgorithmHotkeys();
   if(controls.asciiChars){
     controls.asciiChars.value = state.customASCIIString;
   }
@@ -392,29 +535,14 @@ function getExportScalePreset(){
 }
 
 function getExportBaseSize(){
-  if(state.lastResult){
-    if(state.lastResult.type === 'image' && state.lastResult.frame){
-      const frame = state.lastResult.frame;
-      return {
-        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
-        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
-      };
-    }
-    if(state.lastResult.type === 'video' && state.lastResult.frames && state.lastResult.frames.length){
-      const frame = state.lastResult.frames[0];
-      return {
-        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
-        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
-      };
-    }
-  }
-  if(state.sourceWidth && state.sourceHeight){
-    return {width: state.sourceWidth, height: state.sourceHeight};
-  }
-  if(state.lastSize.width && state.lastSize.height){
-    return {width: state.lastSize.width, height: state.lastSize.height};
-  }
-  return {width: 1024, height: 1024};
+  return computeExportBaseSize({
+    sourceKind: state.sourceKind,
+    videoSource: state.videoSource,
+    lastResult: state.lastResult,
+    sourceWidth: state.sourceWidth,
+    sourceHeight: state.sourceHeight,
+    lastSize: state.lastSize
+  });
 }
 
 function updateExportDimensionPlaceholders(){
@@ -711,6 +839,414 @@ function bindPlaybackControl(){
       updatePlaybackButton(true, false);
     }
   });
+}
+
+function initAlgorithmUI(){
+  const container = $('algorithmList');
+  if(!container){
+    return;
+  }
+  container.innerHTML = '';
+  state.algorithmSettings = {};
+  state.algorithmControls = new Map();
+  state.algorithmHotkeys = new Map();
+  for(const def of ALGORITHM_DEFS){
+    const defaults = cloneAlgorithmDefaults(def.defaults || {});
+    state.algorithmSettings[def.id] = {
+      enabled: false,
+      params: defaults
+    };
+    if(def.hotkey){
+      state.algorithmHotkeys.set(def.hotkey.toLowerCase(), def.id);
+    }
+    const item = document.createElement('div');
+    item.className = 'algorithm-item';
+    const header = document.createElement('div');
+    header.className = 'algorithm-item__header';
+    const title = document.createElement('label');
+    title.className = 'algorithm-item__title';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = `algo-${def.id}`;
+    title.htmlFor = checkbox.id;
+    title.textContent = def.label;
+    header.appendChild(title);
+    header.appendChild(checkbox);
+    const controlsWrap = document.createElement('div');
+    controlsWrap.className = 'algorithm-item__controls';
+    const paramRefs = new Map();
+    for(const param of def.params || []){
+      const field = document.createElement('div');
+      field.className = 'field';
+      const label = document.createElement('label');
+      label.textContent = param.label || param.key;
+      field.appendChild(label);
+      const { input, display } = createAlgorithmParamInput(def, param, defaults[param.key]);
+      if(param.placeholder){
+        input.placeholder = param.placeholder;
+      }
+      input.disabled = true;
+      if(display){
+        field.appendChild(display);
+      }
+      field.appendChild(input);
+      controlsWrap.appendChild(field);
+      paramRefs.set(param.key, { input, display, definition: param });
+    }
+    checkbox.addEventListener('change', () => {
+      const settings = state.algorithmSettings[def.id];
+      settings.enabled = checkbox.checked;
+      setAlgorithmControlsEnabled(def.id, checkbox.checked);
+      handleAlgorithmChange();
+    });
+    item.appendChild(header);
+    if((def.params || []).length){
+      item.appendChild(controlsWrap);
+    }
+    container.appendChild(item);
+    state.algorithmControls.set(def.id, { root: item, checkbox, params: paramRefs });
+    setAlgorithmControlsEnabled(def.id, false);
+    syncAlgorithmControlValues(def.id);
+  }
+}
+
+function createAlgorithmParamInput(def, param, defaultValue){
+  let value = defaultValue;
+  if(value === undefined){
+    value = param.type === 'checkbox' ? false : '';
+  }
+  let input;
+  let display = null;
+  if(param.type === 'select'){
+    input = document.createElement('select');
+    for(const option of param.options || []){
+      const opt = document.createElement('option');
+      opt.value = String(option.value);
+      opt.textContent = option.label;
+      if(String(option.value) === String(value)){
+        opt.selected = true;
+      }
+      input.appendChild(opt);
+    }
+  }else if(param.type === 'checkbox'){
+    input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = Boolean(value);
+  }else if(param.type === 'range'){
+    input = document.createElement('input');
+    input.type = 'range';
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    input.value = String(value != null ? value : param.min || 0);
+    display = document.createElement('span');
+    display.className = 'algorithm-value';
+    display.textContent = formatAlgorithmDisplayValue(param, Number(input.value));
+  }else{
+    input = document.createElement('input');
+    input.type = param.type === 'number' ? 'number' : 'text';
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    let initial = value != null ? value : '';
+    if(param.key === 'palette' && Array.isArray(value)){
+      initial = stringifyPalette(value);
+    }else if(param.key === 'angles' && Array.isArray(value)){
+      initial = value.join(',');
+    }
+    input.value = initial != null ? String(initial) : '';
+  }
+  input.dataset.algoKey = param.key;
+  const updateFn = () => {
+    const settings = state.algorithmSettings[def.id];
+    if(param.type === 'checkbox'){
+      settings.params[param.key] = input.checked;
+    }else if(param.type === 'select'){
+      const selected = input.value;
+      const numeric = Number(selected);
+      settings.params[param.key] = Number.isNaN(numeric) ? selected : numeric;
+    }else if(param.type === 'range' || param.type === 'number'){
+      const num = Number(input.value);
+      settings.params[param.key] = Number.isFinite(num) ? num : (settings.params[param.key] || 0);
+      if(display){
+        display.textContent = formatAlgorithmDisplayValue(param, settings.params[param.key]);
+      }
+    }else{
+      settings.params[param.key] = input.value;
+    }
+    handleAlgorithmChange();
+  };
+  const eventType = param.type === 'checkbox' || param.type === 'select' ? 'change' : 'input';
+  input.addEventListener(eventType, updateFn);
+  return { input, display };
+}
+
+function formatAlgorithmDisplayValue(param, value){
+  if(typeof value !== 'number' || Number.isNaN(value)){
+    return '';
+  }
+  const step = typeof param.step === 'number' ? param.step : 0.1;
+  const decimals = step < 1 ? Math.max(0, Math.ceil(Math.abs(Math.log10(step)))) : 0;
+  return value.toFixed(decimals);
+}
+
+function setAlgorithmControlsEnabled(id, enabled){
+  const refs = state.algorithmControls.get(id);
+  if(!refs) return;
+  refs.root.classList.toggle('is-enabled', enabled);
+  if(refs.checkbox){
+    refs.checkbox.checked = enabled;
+  }
+  for(const [, ref] of refs.params){
+    ref.input.disabled = !enabled;
+  }
+}
+
+function syncAlgorithmControlValues(id){
+  const refs = state.algorithmControls.get(id);
+  const settings = state.algorithmSettings[id];
+  if(!refs || !settings) return;
+  for(const [key, ref] of refs.params){
+    const paramDef = ref.definition;
+    const value = settings.params[key];
+    if(paramDef.type === 'checkbox'){
+      ref.input.checked = Boolean(value);
+    }else if(paramDef.type === 'select'){
+      ref.input.value = String(value);
+    }else{
+      let val = value != null ? value : '';
+      if(paramDef.key === 'palette' && Array.isArray(value)){
+        val = stringifyPalette(value);
+      }else if(paramDef.key === 'angles' && Array.isArray(value)){
+        val = value.join(',');
+      }
+      ref.input.value = String(val);
+      if(ref.display && typeof value === 'number'){
+        ref.display.textContent = formatAlgorithmDisplayValue(paramDef, Number(value));
+      }
+    }
+  }
+  setAlgorithmControlsEnabled(id, settings.enabled);
+}
+
+function bindAlgorithmPresetButtons(){
+  const saveBtn = $('algoPresetSave');
+  if(saveBtn){
+    saveBtn.addEventListener('click', exportAlgorithmPreset);
+  }
+  const loadBtn = $('algoPresetLoad');
+  if(loadBtn){
+    loadBtn.addEventListener('click', importAlgorithmPreset);
+  }
+}
+
+function bindAlgorithmHotkeys(){
+  document.addEventListener('keydown', (event) => {
+    if(event.defaultPrevented) return;
+    if(event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if(target && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)){
+      return;
+    }
+    const key = event.key ? event.key.toLowerCase() : '';
+    if(!key) return;
+    const effectId = state.algorithmHotkeys.get(key);
+    if(!effectId) return;
+    event.preventDefault();
+    toggleAlgorithm(effectId);
+  });
+}
+
+function toggleAlgorithm(id){
+  const settings = state.algorithmSettings[id];
+  if(!settings) return;
+  settings.enabled = !settings.enabled;
+  syncAlgorithmControlValues(id);
+  handleAlgorithmChange();
+}
+
+function handleAlgorithmChange(){
+  fastRender(true);
+}
+
+function cloneAlgorithmDefaults(defaults){
+  if(!defaults) return {};
+  return JSON.parse(JSON.stringify(defaults));
+}
+
+function buildAlgorithmChain(){
+  const effects = [];
+  for(const def of ALGORITHM_DEFS){
+    const settings = state.algorithmSettings[def.id];
+    if(!settings || !settings.enabled) continue;
+    const params = prepareAlgorithmParams(def, settings.params);
+    effects.push({ name: def.id, params });
+  }
+  return effects;
+}
+
+function prepareAlgorithmParams(def, params){
+  const output = {};
+  for(const param of def.params || []){
+    const value = params[param.key];
+    if(param.type === 'checkbox'){
+      output[param.key] = Boolean(value);
+    }else if(param.type === 'select'){
+      const numeric = Number(value);
+      output[param.key] = Number.isNaN(numeric) ? value : numeric;
+    }else if(param.type === 'range' || param.type === 'number'){
+      const num = Number(value);
+      output[param.key] = Number.isFinite(num) ? num : Number(param.min || 0);
+    }else if(param.key === 'palette'){
+      output[param.key] = parsePaletteValue(value, def.defaults && def.defaults.palette);
+    }else if(param.key === 'angles'){
+      output[param.key] = parseAnglesValue(value, def.defaults && def.defaults.angles);
+    }else{
+      output[param.key] = value;
+    }
+  }
+  return output;
+}
+
+function parsePaletteValue(value, fallback){
+  if(Array.isArray(value)){
+    return value;
+  }
+  if(typeof value !== 'string'){
+    return Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]];
+  }
+  const parts = value.split(/[;,\s]+/).map((part) => part.trim()).filter(Boolean);
+  if(!parts.length){
+    return Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]];
+  }
+  const palette = [];
+  for(const part of parts){
+    const hex = part.replace('#','');
+    if(hex.length === 6){
+      const r = parseInt(hex.slice(0,2), 16);
+      const g = parseInt(hex.slice(2,4), 16);
+      const b = parseInt(hex.slice(4,6), 16);
+      if(Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)){
+        palette.push([r, g, b]);
+      }
+    }
+  }
+  return palette.length ? palette : (Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]]);
+}
+
+function stringifyPalette(palette){
+  if(!Array.isArray(palette)) return '';
+  return palette.map((color) => {
+    if(!Array.isArray(color) || color.length < 3) return '#000000';
+    const [r, g, b] = color;
+    const toHex = (val) => {
+      const clamped = Math.max(0, Math.min(255, Math.round(val || 0)));
+      return clamped.toString(16).padStart(2, '0');
+    };
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }).join(',');
+}
+
+function parseAnglesValue(value, fallback){
+  if(Array.isArray(value)){
+    return value;
+  }
+  if(typeof value !== 'string'){
+    return Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135];
+  }
+  const parts = value.split(/[;,]+/).map((part) => Number(part.trim())).filter((num) => Number.isFinite(num));
+  return parts.length ? parts : (Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135]);
+}
+
+async function applyAlgorithmsToCanvas(canvas, { preview = false } = {}){
+  if(!canvas) return;
+  const effects = buildAlgorithmChain();
+  if(!effects.length) return;
+  try{
+    await applyToCanvas(canvas, effects, { preview, maxDimension: preview ? 1024 : undefined });
+  }catch(err){
+    console.warn('[algorithms] applicazione fallita', err);
+  }
+}
+
+function scheduleAlgorithmPreview(canvas){
+  state.algorithmActiveCanvas = canvas || null;
+  const effects = buildAlgorithmChain();
+  if(!effects.length || !canvas) return;
+  requestAnimationFrame(() => {
+    applyAlgorithmsToCanvas(canvas, { preview: true });
+  });
+}
+
+function exportAlgorithmPreset(){
+  const payload = {};
+  for(const def of ALGORITHM_DEFS){
+    const settings = state.algorithmSettings[def.id];
+    if(!settings) continue;
+    payload[def.id] = {
+      enabled: settings.enabled,
+      params: cloneAlgorithmDefaults(settings.params)
+    };
+  }
+  const json = JSON.stringify(payload, null, 2);
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(json).then(() => {
+      console.log('Preset copiato negli appunti');
+    }).catch(() => {
+      window.prompt('Preset algoritmi', json);
+    });
+  }else{
+    window.prompt('Preset algoritmi', json);
+  }
+}
+
+function importAlgorithmPreset(){
+  const raw = window.prompt('Incolla il preset algoritmi');
+  if(!raw) return;
+  let parsed;
+  try{
+    parsed = JSON.parse(raw);
+  }catch(err){
+    alert('Preset non valido');
+    return;
+  }
+  for(const def of ALGORITHM_DEFS){
+    const entry = parsed ? parsed[def.id] : null;
+    if(!entry) continue;
+    const settings = state.algorithmSettings[def.id];
+    if(!settings) continue;
+    settings.enabled = Boolean(entry.enabled);
+    settings.params = normalizeAlgorithmParams(def, entry.params || {});
+    syncAlgorithmControlValues(def.id);
+  }
+  handleAlgorithmChange();
+}
+
+function normalizeAlgorithmParams(def, params){
+  const clone = cloneAlgorithmDefaults(def.defaults || {});
+  if(!params) return clone;
+  for(const param of def.params || []){
+    const value = params[param.key];
+    if(value === undefined) continue;
+    if(param.type === 'checkbox'){
+      clone[param.key] = Boolean(value);
+    }else if(param.type === 'select'){
+      const numeric = Number(value);
+      clone[param.key] = Number.isNaN(numeric) ? value : numeric;
+    }else if(param.type === 'range' || param.type === 'number'){
+      const num = Number(value);
+      if(Number.isFinite(num)){
+        clone[param.key] = num;
+      }
+    }else if(param.key === 'palette'){
+      clone[param.key] = Array.isArray(value) ? value : parsePaletteValue(String(value), def.defaults && def.defaults.palette);
+    }else if(param.key === 'angles'){
+      clone[param.key] = Array.isArray(value) ? value : parseAnglesValue(String(value), def.defaults && def.defaults.angles);
+    }else{
+      clone[param.key] = value;
+    }
+  }
+  return clone;
 }
 
 function beginUpload(name=''){
@@ -2119,6 +2655,7 @@ function renderPreview(previewData, scale){
     canvas.style.height = `${cssHeight}px`;
     canvas.style.imageRendering = 'pixelated';
     frame.appendChild(canvas);
+    scheduleAlgorithmPreview(canvas);
     updatePlaybackButton(false);
   }else if(previewData.type === 'animation'){
     const canvas = document.createElement('canvas');
@@ -2617,6 +3154,7 @@ async function downloadRaster(format){
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
   const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
+  await applyAlgorithmsToCanvas(canvas, { preview: false });
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
