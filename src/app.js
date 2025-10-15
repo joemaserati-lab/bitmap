@@ -1,5 +1,6 @@
 import { applyToCanvas } from './postfx.js';
 import { ensureEffect } from './effects/index.js';
+import { computeExportBaseSize } from './exportSizing.mjs';
 
 const $ = (id) => document.getElementById(id);
 
@@ -392,29 +393,14 @@ function getExportScalePreset(){
 }
 
 function getExportBaseSize(){
-  if(state.lastResult){
-    if(state.lastResult.type === 'image' && state.lastResult.frame){
-      const frame = state.lastResult.frame;
-      return {
-        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
-        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
-      };
-    }
-    if(state.lastResult.type === 'video' && state.lastResult.frames && state.lastResult.frames.length){
-      const frame = state.lastResult.frames[0];
-      return {
-        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
-        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
-      };
-    }
-  }
-  if(state.sourceWidth && state.sourceHeight){
-    return {width: state.sourceWidth, height: state.sourceHeight};
-  }
-  if(state.lastSize.width && state.lastSize.height){
-    return {width: state.lastSize.width, height: state.lastSize.height};
-  }
-  return {width: 1024, height: 1024};
+  return computeExportBaseSize({
+    sourceKind: state.sourceKind,
+    videoSource: state.videoSource,
+    lastResult: state.lastResult,
+    sourceWidth: state.sourceWidth,
+    sourceHeight: state.sourceHeight,
+    lastSize: state.lastSize
+  });
 }
 
 function updateExportDimensionPlaceholders(){
