@@ -1,7 +1,7 @@
 import { applyToCanvas, runPostEffects } from './postfx.js';
 import { ensureEffect } from './effects/index.js';
 import { computeExportBaseSize } from './exportSizing.mjs';
-import { CPU_ONLY_EFFECTS } from './constants.js';
+import { CPU_ONLY_EFFECTS, GRADIENT_MAPS } from './constants.js';
 import { captureVideoFrameImageData } from './utils/video.js';
 
 const $ = (id) => document.getElementById(id);
@@ -9,6 +9,7 @@ const $ = (id) => document.getElementById(id);
 const preview = $('preview');
 const meta = $('meta');
 const previewNotice = $('previewNotice');
+const gradientPreview = $('gradientPreview');
 const uploadMessage = $('uploadMessage');
 const progressWrap = $('uploadProgressWrapper');
 const progressBar = $('uploadProgressBar');
@@ -22,7 +23,7 @@ const CONTROL_IDS = [
   'pixelSize','pixelSizeNum','threshold','thresholdNum','blur','blurNum','grain','grainNum','glow','glowNum',
   'blackPoint','blackPointNum','whitePoint','whitePointNum','gammaVal','gammaValNum',
   'brightness','brightnessNum','contrast','contrastNum','style','thickness','thicknessNum',
-  'dither','asciiChars','asciiWord','invert','bg','fg','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
+  'dither','asciiChars','asciiWord','invert','bg','fg','gradientMap','scale','scaleNum','fmt','dpi','exportScale','outW','outH','lockAR',
   'jpegQ','jpegQNum','rasterBG'
 ];
 
@@ -49,6 +50,8 @@ const ASCII_CUSTOM_MAX = 64;
 const ASCII_WORD_MAX = 32;
 const ADVANCED_VIDEO_NOTICE = 'RIPRODUZIONE VIDEO LIMITATA: QUESTO DITHERING AVANZATO È VISIBILE SOLO IN PAUSA ED È SEMPRE APPLICATO IN EXPORT.';
 const CPU_ONLY_ADVANCED_DITHERS = new Set(CPU_ONLY_EFFECTS);
+const GRADIENT_LOOKUP = new Map(GRADIENT_MAPS.map((entry) => [entry.id, entry]));
+const GRADIENT_PARSE_CACHE = new Map();
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
@@ -192,6 +195,237 @@ const ADVANCED_DITHER_DEFS = [
   }
 ];
 
+function getGradientEntry(id){
+  if(!id) return null;
+  return GRADIENT_LOOKUP.get(id) || null;
+}
+
+function parseLinearGradient(input){
+  if(typeof input !== 'string'){ return null; }
+  const match = input.trim().match(/^linear-gradient\s*\((.*)\)$/i);
+  if(!match){ return null; }
+  const inner = match[1];
+  const parts = [];
+  let current = '';
+  let depth = 0;
+  for(let i=0;i<inner.length;i++){
+    const ch = inner[i];
+    if(ch === '('){
+      depth++;
+      current += ch;
+      continue;
+    }
+    if(ch === ')'){
+      depth = Math.max(0, depth - 1);
+      current += ch;
+      continue;
+    }
+    if(ch === ',' && depth === 0){
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if(current.trim()){ parts.push(current.trim()); }
+  if(parts.length < 2){ return null; }
+  let angle = 180;
+  let index = 0;
+  const first = parts[0];
+  if(/deg/i.test(first)){
+    const matchAngle = first.match(/(-?\d*\.?\d+)/);
+    if(matchAngle){
+      const parsed = parseFloat(matchAngle[1]);
+      if(Number.isFinite(parsed)){ angle = parsed; }
+    }
+    index = 1;
+  }
+  const stops = [];
+  const totalStops = Math.max(1, parts.length - index);
+  for(let i=index;i<parts.length;i++){
+    const part = parts[i];
+    if(!part){ continue; }
+    const tokens = part.split(/\s+/).filter(Boolean);
+    if(!tokens.length){ continue; }
+    const color = tokens[0];
+    let offset = null;
+    if(tokens.length > 1){
+      const pct = tokens[1].match(/(-?\d*\.?\d+)%/);
+      if(pct){
+        offset = parseFloat(pct[1]) / 100;
+      }else{
+        const value = parseFloat(tokens[1]);
+        if(Number.isFinite(value)){
+          offset = value > 1 ? value / 100 : value;
+        }
+      }
+    }
+    if(offset == null){
+      offset = stops.length / Math.max(1, totalStops - 1);
+    }
+    offset = Math.max(0, Math.min(1, offset));
+    stops.push({ color, offset });
+  }
+  if(!stops.length){ return null; }
+  stops.sort((a, b) => a.offset - b.offset);
+  return { angle, stops };
+}
+
+function getParsedGradient(entry){
+  if(!entry || !entry.gradient){ return null; }
+  if(GRADIENT_PARSE_CACHE.has(entry.id)){
+    return GRADIENT_PARSE_CACHE.get(entry.id);
+  }
+  const parsed = parseLinearGradient(entry.gradient);
+  GRADIENT_PARSE_CACHE.set(entry.id, parsed);
+  return parsed;
+}
+
+function getParsedGradientById(id){
+  const entry = getGradientEntry(id);
+  if(!entry){ return null; }
+  return getParsedGradient(entry);
+}
+
+function ensureAsciiMeasureContext(){
+  if(asciiMeasureCtx){ return asciiMeasureCtx; }
+  if(typeof document === 'undefined'){ return null; }
+  asciiMeasureCanvas = document.createElement('canvas');
+  asciiMeasureCanvas.width = ASCII_MEASURE_SIZE;
+  asciiMeasureCanvas.height = ASCII_MEASURE_SIZE;
+  asciiMeasureCtx = asciiMeasureCanvas.getContext('2d', { willReadFrequently: true });
+  return asciiMeasureCtx;
+}
+
+function measureAsciiLightness(ch){
+  const ctx = ensureAsciiMeasureContext();
+  if(!ctx){ return 0; }
+  const size = ASCII_MEASURE_SIZE;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#000000';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${Math.floor(size * 0.7)}px ${ASCII_FONT_STACK}`;
+  try{
+    ctx.fillText(ch, size / 2, size / 2);
+  }catch{
+    // ignore drawing errors for unsupported glyphs
+  }
+  const data = ctx.getImageData(0, 0, size, size).data;
+  let sum = 0;
+  for(let i=0;i<data.length;i+=4){
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  const pixels = data.length / 4;
+  const avg = pixels > 0 ? (sum / pixels) / 255 : 0;
+  return Math.max(0, Math.min(1, avg));
+}
+
+function sortASCIICharactersByLightness(chars){
+  const ctx = ensureAsciiMeasureContext();
+  if(!ctx){ return chars; }
+  const metrics = chars.map((ch) => ({ ch, lightness: measureAsciiLightness(ch) }));
+  metrics.sort((a, b) => {
+    if(b.lightness !== a.lightness){
+      return b.lightness - a.lightness;
+    }
+    return a.ch.localeCompare(b.ch);
+  });
+  return metrics.map((entry) => entry.ch);
+}
+
+function computeGradientLine(width, height, definition){
+  if(!definition){
+    return null;
+  }
+  const angle = Number.isFinite(definition.angle) ? definition.angle : 180;
+  const rad = (angle - 90) * Math.PI / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const length = Math.abs(width * cos) + Math.abs(height * sin);
+  const x0 = halfW - cos * length / 2;
+  const y0 = halfH - sin * length / 2;
+  const x1 = halfW + cos * length / 2;
+  const y1 = halfH + sin * length / 2;
+  return {x0, y0, x1, y1};
+}
+
+function createCanvasGradient(ctx, width, height, definition){
+  if(!ctx || !definition || !definition.stops || !definition.stops.length){
+    return null;
+  }
+  const line = computeGradientLine(width, height, definition);
+  if(!line){
+    return null;
+  }
+  const gradient = ctx.createLinearGradient(line.x0, line.y0, line.x1, line.y1);
+  for(const stop of definition.stops){
+    const offset = Math.max(0, Math.min(1, stop.offset));
+    gradient.addColorStop(offset, stop.color);
+  }
+  return gradient;
+}
+
+let svgGradientCounter = 0;
+
+function buildGradientOverlayElements(width, height, gradientId, maskMarkup=''){
+  if(!gradientId || gradientId === 'none'){
+    return null;
+  }
+  if(width <= 0 || height <= 0){
+    return null;
+  }
+  const parsed = getParsedGradientById(gradientId);
+  if(!parsed || !parsed.stops || !parsed.stops.length){
+    return null;
+  }
+  const line = computeGradientLine(width, height, parsed);
+  if(!line){
+    return null;
+  }
+  svgGradientCounter = (svgGradientCounter + 1) % 1000000;
+  const gradientRef = `grad${svgGradientCounter}`;
+  const maskRef = `mask${svgGradientCounter}`;
+  let defs = `<linearGradient id="${gradientRef}" gradientUnits="userSpaceOnUse" x1="${formatNumber(line.x0)}" y1="${formatNumber(line.y0)}" x2="${formatNumber(line.x1)}" y2="${formatNumber(line.y1)}">`;
+  for(const stop of parsed.stops){
+    const offset = Math.max(0, Math.min(1, stop.offset));
+    defs += `<stop offset="${formatNumber(offset)}" stop-color="${escapeXML(stop.color)}"/>`;
+  }
+  defs += '</linearGradient>';
+  let overlay = `<rect width="${formatNumber(width)}" height="${formatNumber(height)}" fill="url(#${gradientRef})"`;
+  if(maskMarkup){
+    defs += `<mask id="${maskRef}" maskUnits="userSpaceOnUse">${maskMarkup}</mask>`;
+    overlay += ` mask="url(#${maskRef})"`;
+  }
+  overlay += '/>';
+  return {defs, overlay};
+}
+
+function applyGradientOverlay(ctx, gradientId, width, height){
+  if(!ctx || !width || !height){ return; }
+  if(!gradientId || gradientId === 'none'){ return; }
+  const parsed = getParsedGradientById(gradientId);
+  if(!parsed || !parsed.stops || !parsed.stops.length){ return; }
+  const gradient = createCanvasGradient(ctx, width, height, parsed);
+  if(!gradient){ return; }
+  ctx.save();
+  try{
+    ctx.globalCompositeOperation = 'source-atop';
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+  }finally{
+    ctx.restore();
+  }
+}
+
 function clamp01(value){
   const num = Number(value);
   if(!Number.isFinite(num)) return 0;
@@ -282,6 +516,10 @@ function getPaletteByKey(key){
 }
 
 const ASCII_FONT_STACK = 'IBM Plex Mono, SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace';
+const ASCII_MEASURE_SIZE = 72;
+let asciiMeasureCanvas = null;
+let asciiMeasureCtx = null;
+let invertToggleButtons = [];
 
 const state = {
   sourceCanvas: null,
@@ -307,7 +545,7 @@ const state = {
   lastResult: null,
   lastResultId: 0,
   lastPreview: null,
-  lastSVG: '',
+  lastSVGCache: { base: '', gradient: '' },
   lastSVGJob: 0,
   lastSize: {width: 0, height: 0},
   lastScale: 1,
@@ -327,7 +565,9 @@ const state = {
   advancedDitherJobCounter: 0,
   previewDisposables: [],
   advancedControlsLocked: false,
-  previewDefaultNotice: ''
+  previewDefaultNotice: '',
+  gradientMap: 'none',
+  lastInvertMode: 'auto'
 };
 
 function disposePreviewAssets(){
@@ -396,7 +636,8 @@ function init(){
   }
   updateAsciiCustomVisibility();
   window.addEventListener('resize', () => {
-    if(!state.lastSVG) return;
+    const cache = state.lastSVGCache;
+    if(!cache || (!cache.base && !cache.gradient)) return;
     schedulePreviewRefresh();
   });
   setSourceCanvas(getPlaceholderCanvas(), '');
@@ -494,6 +735,8 @@ function bindControls(){
       fastRender();
     });
   }
+  populateGradientOptions();
+  setupInvertControls();
   if(controls.asciiChars){
     controls.asciiChars.addEventListener('input', handleCustomASCIIInput);
     controls.asciiChars.addEventListener('blur', syncCustomASCIIInput);
@@ -502,7 +745,7 @@ function bindControls(){
     controls.asciiWord.addEventListener('input', handleASCIIWordInput);
     controls.asciiWord.addEventListener('blur', syncASCIIWordInput);
   }
-  const changeIds = ['dither','invert','bg','fg','style','fmt','dpi','lockAR'];
+  const changeIds = ['dither','invert','bg','fg','style','fmt','dpi','lockAR','gradientMap'];
   for(const id of changeIds){
     const el = controls[id];
     if(!el) continue;
@@ -513,6 +756,8 @@ function bindControls(){
         }
         updateAsciiCustomVisibility();
         updateAdvancedDitherVisibility();
+      }else if(id === 'gradientMap'){
+        updateGradientPreviewUI(el.value);
       }
       fastRender();
     });
@@ -534,6 +779,83 @@ function bindControls(){
   }
 
   cacheCpuOnlyDitherOptions();
+}
+
+function populateGradientOptions(){
+  const select = controls.gradientMap;
+  if(!select){
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for(const entry of GRADIENT_MAPS){
+    const option = document.createElement('option');
+    option.value = entry.id;
+    option.textContent = entry.name;
+    fragment.appendChild(option);
+  }
+  select.innerHTML = '';
+  select.appendChild(fragment);
+  const initial = GRADIENT_LOOKUP.has(state.gradientMap) ? state.gradientMap : 'none';
+  select.value = initial;
+  state.gradientMap = initial;
+  updateGradientPreviewUI(initial);
+}
+
+function setupInvertControls(){
+  if(!controls.invert){
+    return;
+  }
+  invertToggleButtons = Array.from(document.querySelectorAll('.invert-toggle__btn'));
+  const current = controls.invert.value || state.lastInvertMode || 'auto';
+  for(const btn of invertToggleButtons){
+    const option = btn.dataset.invertOption || 'auto';
+    btn.setAttribute('aria-pressed','false');
+    btn.addEventListener('click', () => {
+      setInvertMode(option);
+    });
+  }
+  setInvertMode(current, { silent: true });
+}
+
+function setInvertMode(mode, { silent = false } = {}){
+  const value = mode === 'yes' ? 'yes' : (mode === 'no' ? 'no' : 'auto');
+  if(controls.invert){
+    controls.invert.value = value;
+  }
+  for(const btn of invertToggleButtons){
+    const isActive = btn.dataset.invertOption === value;
+    btn.classList.toggle('is-active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  }
+  const previous = state.lastInvertMode;
+  state.lastInvertMode = value;
+  if(!silent && controls.invert && previous !== value){
+    controls.invert.dispatchEvent(new Event('change', { bubbles: false }));
+  }
+}
+
+function updateGradientPreviewUI(value){
+  if(!gradientPreview){
+    return;
+  }
+  const entry = getGradientEntry(value);
+  if(entry && entry.gradient){
+    gradientPreview.style.background = entry.gradient;
+    gradientPreview.hidden = false;
+  }else{
+    gradientPreview.style.background = 'transparent';
+    gradientPreview.hidden = true;
+  }
+}
+
+function getSelectedGradient(){
+  if(controls.gradientMap){
+    const current = controls.gradientMap.value || 'none';
+    if(GRADIENT_LOOKUP.has(current)){
+      return current;
+    }
+  }
+  return GRADIENT_LOOKUP.has(state.gradientMap) ? state.gradientMap : 'none';
 }
 
 function updateAsciiCustomVisibility(){
@@ -1255,7 +1577,7 @@ function buildAdvancedDitherChain(){
   return [{ name: def.id, params: { ...params, _globals: globals } }];
 }
 
-async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null, maxPreviewDimension = ADVANCED_PREVIEW_MAX_DIMENSION } = {}){
+async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null, maxPreviewDimension = ADVANCED_PREVIEW_MAX_DIMENSION, gradient = null } = {}){
   if(!canvas) return;
   const chain = effects && effects.length ? effects : buildAdvancedDitherChain();
   if(!chain.length) return;
@@ -1268,6 +1590,15 @@ async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = nu
       maxDimension: preview ? maxPreviewDimension : undefined,
       shouldAbort
     });
+    if(typeof shouldAbort === 'function' && shouldAbort()){
+      return;
+    }
+    if(gradient && gradient !== 'none'){
+      const ctx = canvas.getContext('2d');
+      if(ctx){
+        applyGradientOverlay(ctx, gradient, canvas.width, canvas.height);
+      }
+    }
   }catch(err){
     console.warn('[dither] applicazione avanzata fallita', err);
   }
@@ -1287,7 +1618,12 @@ function scheduleAdvancedDitherPreview(canvas){
   requestAnimationFrame(() => {
     if(state.advancedDitherActiveCanvas !== canvas) return;
     if(state.advancedDitherPreviewTokens.get(canvas) !== token) return;
-    applyAdvancedDitherToCanvas(canvas, { preview: true, token, maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION });
+    applyAdvancedDitherToCanvas(canvas, {
+      preview: true,
+      token,
+      maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION,
+      gradient: getSelectedGradient()
+    });
   });
 }
 
@@ -1359,6 +1695,7 @@ async function scheduleCpuVideoPreview(player, index){
   const token = ++state.advancedDitherJobCounter;
   state.advancedDitherPreviewTokens.set(canvas, token);
   const videoEl = player.videoEl;
+  const frame = player.data && Array.isArray(player.data.frames) ? player.data.frames[index] : null;
   try{
     if(videoEl){
       const targetTime = getVideoFrameTime(player, index);
@@ -1404,13 +1741,22 @@ async function scheduleCpuVideoPreview(player, index){
               ctx.clearRect(0, 0, player.width, player.height);
             }
             ctx.drawImage(helper.canvas, 0, 0, player.width, player.height);
+            const gradientKey = (frame && frame.gradient) || player.data.gradient || state.gradientMap || 'none';
+            if(gradientKey && gradientKey !== 'none'){
+              applyGradientOverlay(ctx, gradientKey, player.width, player.height);
+            }
           }finally{
             ctx.restore();
           }
         }
       }
     }else{
-      await applyAdvancedDitherToCanvas(canvas, { preview: true, token, maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION });
+      await applyAdvancedDitherToCanvas(canvas, {
+        preview: true,
+        token,
+        maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION,
+        gradient: getSelectedGradient()
+      });
     }
   }catch(err){
     console.warn('[video] advanced preview failed', err);
@@ -1854,7 +2200,7 @@ function setSourceCanvas(canvas, name){
   state.lastResult = null;
   state.lastResultId = 0;
   state.lastPreview = null;
-  state.lastSVG = '';
+  state.lastSVGCache = { base: '', gradient: '' };
   state.lastSVGJob = 0;
   state.lastSize = {width: 0, height: 0};
   state.lastScale = 1;
@@ -1899,7 +2245,7 @@ function setSourceVideo(videoData, name){
   state.lastResult = null;
   state.lastResultId = 0;
   state.lastPreview = null;
-  state.lastSVG = '';
+  state.lastSVGCache = { base: '', gradient: '' };
   state.lastSVGJob = 0;
   state.lastSize = {width: 0, height: 0};
   state.lastScale = 1;
@@ -2036,18 +2382,31 @@ function clampInt(value, min, max){
 }
 
 function normalizeCustomASCIIString(input){
-  let chars = Array.from(typeof input === 'string' ? input : '');
-  chars = chars.filter((ch) => ch !== '\r' && ch !== '\n');
-  if(chars.length === 0){
-    chars = Array.from(DEFAULT_ASCII_CUSTOM);
+  const rawChars = Array.from(typeof input === 'string' ? input : '');
+  const seen = new Set();
+  const filtered = [];
+  for(const ch of rawChars){
+    if(ch === '\r' || ch === '\n'){ continue; }
+    if(seen.has(ch)){ continue; }
+    seen.add(ch);
+    filtered.push(ch);
   }
-  if(!chars.includes(' ')){
-    chars.unshift(' ');
+  if(filtered.length === 0){
+    return normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM);
   }
-  if(chars.length > ASCII_CUSTOM_MAX){
-    chars.length = ASCII_CUSTOM_MAX;
+  if(!seen.has(' ')){
+    filtered.unshift(' ');
   }
-  return chars.join('');
+  if(filtered.length > ASCII_CUSTOM_MAX){
+    filtered.length = ASCII_CUSTOM_MAX;
+  }
+  const sorted = sortASCIICharactersByLightness(filtered);
+  if(sorted[0] !== ' '){
+    const withoutSpace = sorted.filter((ch) => ch !== ' ');
+    sorted.length = 0;
+    sorted.push(' ', ...withoutSpace);
+  }
+  return sorted.join('');
 }
 
 function normalizeASCIIWordString(input){
@@ -2079,11 +2438,13 @@ function collectRenderOptions(){
   const invertMode = controls.invert.value||'auto';
   const bg = controls.bg.value||'#ffffff';
   const fg = controls.fg.value||'#000000';
+  const gradientMap = getSelectedGradient();
   const scaleVal = parseFloat(controls.scale.value||'1');
   const scale = Number.isFinite(scaleVal) && scaleVal>0 ? scaleVal : 1;
   const asciiCustom = state.customASCIIString;
   const asciiWord = state.asciiWordString;
-  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom, asciiWord};
+  state.gradientMap = gradientMap;
+  return {px, thr, blurPx, grain, glow, bp, wp, gam, bri, con, style, thick, mode, invertMode, bg, fg, scale, asciiCustom, asciiWord, gradientMap};
 }
 
 function buildWorkerOptions(options){
@@ -2105,6 +2466,7 @@ function buildWorkerOptions(options){
     asciiCustom: options.asciiCustom,
     asciiWord: options.asciiWord,
     mode: options.mode,
+    gradientMap: options.gradientMap,
     advanced
   };
 }
@@ -2149,7 +2511,7 @@ async function generate(){
   }
   state.lastResult = {type: 'image', options, frame: result, frameData};
   state.lastResultId = jobId;
-  state.lastSVG = '';
+  state.lastSVGCache = { base: '', gradient: '' };
   state.lastSVGJob = 0;
   const previewData = buildPreviewData(frameData, options);
   disposePreviewAssets();
@@ -2173,7 +2535,7 @@ async function generateVideoPreview(options){
     state.lastPreview = null;
     disposePreviewAssets();
     state.previewDisposables = [];
-    state.lastSVG = '';
+    state.lastSVGCache = { base: '', gradient: '' };
     state.lastSVGJob = 0;
     state.lastSize = {width: 0, height: 0};
     state.lastScale = options.scale;
@@ -2209,7 +2571,7 @@ async function generateVideoPreview(options){
   }
   state.lastResult = {type: 'video', options, frames, durations};
   state.lastResultId = state.currentJobId;
-  state.lastSVG = '';
+  state.lastSVGCache = { base: '', gradient: '' };
   state.lastSVGJob = 0;
   const previewData = await buildAnimationPreviewData(
     frames,
@@ -2373,6 +2735,7 @@ function createFrameData(result, options){
   const aspectWidth = result.aspectWidth || state.sourceWidth || state.lastSize.width || outputWidth;
   const aspectHeight = result.aspectHeight || state.sourceHeight || state.lastSize.height || outputHeight;
   const adjusted = adjustDimensionsForAspect(outputWidth, outputHeight, aspectWidth, aspectHeight);
+  const gradient = options.gradientMap || 'none';
   if(kind === 'ascii'){
     const charsetKey = result.charsetKey || result.charset || options.mode || 'ascii_simple';
     const asciiArray = ensureASCIIArray(result.ascii);
@@ -2413,7 +2776,8 @@ function createFrameData(result, options){
       aspectWidth,
       aspectHeight,
       aspectRatio: adjusted.ratio,
-      mode: result.mode || options.mode || 'ascii_simple'
+      mode: result.mode || options.mode || 'ascii_simple',
+      gradient
     };
   }
   if(kind === 'thermal'){
@@ -2436,7 +2800,29 @@ function createFrameData(result, options){
       aspectWidth,
       aspectHeight,
       aspectRatio: adjusted.ratio,
-      mode: result.mode || options.mode || 'thermal'
+      mode: result.mode || options.mode || 'thermal',
+      gradient
+    };
+  }
+  if(kind === 'advanced-base'){
+    const tonal = ensureUint8Array(result.tonal);
+    const colors = ensureUint8Array(result.colors);
+    return {
+      kind: 'advanced-base',
+      gridWidth: result.gridWidth,
+      gridHeight: result.gridHeight,
+      tile,
+      tonal,
+      colors,
+      threshold: result.threshold != null ? result.threshold : options.thr,
+      invert: !!result.invert,
+      outputWidth: adjusted.width,
+      outputHeight: adjusted.height,
+      aspectWidth,
+      aspectHeight,
+      aspectRatio: adjusted.ratio,
+      mode: result.mode || options.mode || 'advanced-base',
+      gradient
     };
   }
   if(kind === 'advanced-base'){
@@ -2470,7 +2856,8 @@ function createFrameData(result, options){
     aspectWidth,
     aspectHeight,
     aspectRatio: adjusted.ratio,
-    mode: result.mode || options.mode || 'none'
+    mode: result.mode || options.mode || 'none',
+    gradient
   };
 }
 
@@ -2478,6 +2865,7 @@ function buildPreviewData(frame, options){
   if(!frame){
     return null;
   }
+  const gradient = frame.gradient != null ? frame.gradient : (options && options.gradientMap) || 'none';
   if(frame.kind === 'ascii'){
     return {
       type: 'ascii',
@@ -2493,7 +2881,8 @@ function buildPreviewData(frame, options){
       colors: frame.colors,
       bg: options.bg,
       fg: options.fg,
-      glow: options.glow
+      glow: options.glow,
+      gradient
     };
   }
   if(frame.kind === 'thermal'){
@@ -2511,7 +2900,27 @@ function buildPreviewData(frame, options){
       paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined),
       bg: options.bg,
       fg: options.fg,
-      glow: options.glow
+      glow: options.glow,
+      gradient
+    };
+  }
+  if(frame.kind === 'advanced-base'){
+    return {
+      type: 'advanced-base',
+      mode: frame.mode,
+      width: frame.outputWidth,
+      height: frame.outputHeight,
+      gridWidth: frame.gridWidth,
+      gridHeight: frame.gridHeight,
+      tile: frame.tile,
+      tonal: frame.tonal,
+      colors: frame.colors,
+      threshold: frame.threshold,
+      invert: frame.invert,
+      bg: options.bg,
+      fg: options.fg,
+      glow: options.glow,
+      gradient
     };
   }
   if(frame.kind === 'advanced-base'){
@@ -2543,7 +2952,8 @@ function buildPreviewData(frame, options){
     mask: frame.mask,
     bg: options.bg,
     fg: options.fg,
-    glow: options.glow
+    glow: options.glow,
+    gradient
   };
 }
 
@@ -2564,6 +2974,7 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
   const hasAdvancedFrames = frames.some((frame) => frame && frame.kind === 'advanced-base');
   const advancedChain = disableAdvancedPreview ? [] : buildAdvancedDitherChain();
   const needsAdvanced = hasAdvancedFrames && advancedChain.length > 0;
+  const defaultGradient = (options && options.gradientMap) || 'none';
   let renderCanvas = null;
   let renderCtx = null;
   const alpha = !options.bg || options.bg === 'transparent';
@@ -2597,12 +3008,14 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
           type: frame.kind,
           bg: options.bg,
           fg: options.fg,
-          glow: options.glow
+          glow: options.glow,
+          gradient: frame.gradient || options.gradientMap
         }, advancedPreviewWidth, advancedPreviewHeight);
         await applyAdvancedDitherToCanvas(renderCanvas, {
           preview: true,
           effects: advancedChain,
-          maxPreviewDimension: Math.max(advancedPreviewWidth, advancedPreviewHeight)
+          maxPreviewDimension: Math.max(advancedPreviewWidth, advancedPreviewHeight),
+          gradient: frame.gradient || options.gradientMap
         });
         let bitmap = null;
         if(typeof renderCanvas.transferToImageBitmap === 'function'){
@@ -2629,7 +3042,8 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
             ...frame,
             kind: 'bitmap',
             type: 'bitmap',
-            bitmap
+            bitmap,
+            gradient: frame.gradient || options.gradientMap || defaultGradient
           });
           continue;
         }
@@ -2644,7 +3058,8 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
             ...frame,
             kind: 'bitmap',
             type: 'image-data',
-            imageData
+            imageData,
+            gradient: frame.gradient || options.gradientMap || defaultGradient
           });
           continue;
         }
@@ -2659,7 +3074,8 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
             ...frame,
             kind: 'bitmap',
             type: 'bitmap',
-            canvas: cloneCanvas
+            canvas: cloneCanvas,
+            gradient: frame.gradient || options.gradientMap || defaultGradient
           });
           disposables.push(() => {
             cloneCanvas.width = 0;
@@ -2671,7 +3087,8 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
     }
     previewFrames.push({
       ...frame,
-      type: frame ? frame.kind : undefined
+      type: frame ? frame.kind : undefined,
+      gradient: frame && frame.gradient ? frame.gradient : defaultGradient
     });
   }
   const effectiveDurations = durations.slice(0, previewFrames.length);
@@ -2698,35 +3115,55 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
     autoplay,
     notice,
     videoElement,
-    frameTimes
+    frameTimes,
+    gradient: defaultGradient
   };
 }
 
-function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}){
+function buildMaskSVGString(mask, width, height, tile, bg, fg, opts={}, gradientKey='none', includeGradient = true){
   if(!mask) return '';
   const unit = tile || 1;
   const svgW = Math.round(width*unit);
   const svgH = Math.round(height*unit);
   const pathData = buildMaskPathData(mask, width, height, unit);
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
-  if(bg) svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
+  const defsParts = [];
+  let body = '';
+  let maskMarkup = '';
+  if(bg && bg !== 'transparent'){
+    body += `<rect width="100%" height="100%" fill="${bg}"/>`;
+    maskMarkup += `<rect width="100%" height="100%" fill="#ffffff"/>`;
+  }
   const glowAmount = Math.max(0, opts.glow || 0);
   if(glowAmount > 0 && pathData){
     const fgRGB = hexToRGB(fg || '#000000');
     const glowRGB = lightenColor(fgRGB, 0.4);
     const blurRadius = Math.max(0.2, Math.sqrt(unit*unit) * (0.3 + glowAmount/80));
     const glowOpacity = Math.min(1, 0.18 + glowAmount/120);
-    svg += `<defs><filter id="glowFx" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
-    svg += `<g filter="url(#glowFx)" opacity="${formatNumber(glowOpacity)}"><path fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" d="${pathData}"/></g>`;
+    defsParts.push(`<filter id="glowFx" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter>`);
+    body += `<g filter="url(#glowFx)" opacity="${formatNumber(glowOpacity)}"><path fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" d="${pathData}"/></g>`;
   }
   if(pathData){
-    svg += `<path fill="${fg}" d="${pathData}"/>`;
+    body += `<path fill="${fg}" d="${pathData}"/>`;
+    maskMarkup += `<path fill="#ffffff" d="${pathData}"/>`;
   }
+  const applyGradient = includeGradient && gradientKey && gradientKey !== 'none';
+  const gradientInfo = applyGradient && maskMarkup
+    ? buildGradientOverlayElements(svgW, svgH, gradientKey, maskMarkup)
+    : null;
+  if(gradientInfo){
+    defsParts.push(gradientInfo.defs);
+    body += gradientInfo.overlay;
+  }
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(defsParts.length){
+    svg += `<defs>${defsParts.join('')}</defs>`;
+  }
+  svg += body;
   svg += '</svg>';
   return svg;
 }
 
-function buildIndexedSVGString(indexes, width, height, tile, palette, bg, paletteKey){
+function buildIndexedSVGString(indexes, width, height, tile, palette, bg, paletteKey, gradientKey='none', includeGradient = true){
   const effectivePalette = palette || getPaletteByKey(paletteKey) || THERMAL_PALETTE;
   if(!indexes || !effectivePalette) return '';
   const unit = tile || 1;
@@ -2734,6 +3171,7 @@ function buildIndexedSVGString(indexes, width, height, tile, palette, bg, palett
   const svgH = Math.max(1, Math.round(height * unit));
   const paletteSize = effectivePalette.length / 3;
   const paths = new Array(paletteSize).fill('');
+  let maskPath = '';
   for(let y=0;y<height;y++){
     const rowOffset = y*width;
     let runColor = -1;
@@ -2750,6 +3188,7 @@ function buildIndexedSVGString(indexes, width, height, tile, palette, bg, palett
           const rectX = runStart * unit;
           const rectY = y * unit;
           paths[runColor] += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(unit)}h-${formatNumber(rectWidth)}z`;
+          maskPath += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(unit)}h-${formatNumber(rectWidth)}z`;
         }
       }
       runColor = idx;
@@ -2757,9 +3196,12 @@ function buildIndexedSVGString(indexes, width, height, tile, palette, bg, palett
     }
   }
   const colorCache = new Array(paletteSize);
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  const defsParts = [];
+  let body = '';
+  let maskMarkup = '';
   if(bg && bg !== 'transparent'){
-    svg += `<rect width="100%" height="100%" fill="${bg}"/>`;
+    body += `<rect width="100%" height="100%" fill="${bg}"/>`;
+    maskMarkup += `<rect width="100%" height="100%" fill="#ffffff"/>`;
   }
   for(let i=0;i<paths.length;i++){
     const path = paths[i];
@@ -2773,13 +3215,29 @@ function buildIndexedSVGString(indexes, width, height, tile, palette, bg, palett
       color = `rgb(${r},${g},${b})`;
       colorCache[i] = color;
     }
-    svg += `<path fill="${color}" d="${path}"/>`;
+    body += `<path fill="${color}" d="${path}"/>`;
   }
+  if(maskPath){
+    maskMarkup += `<path fill="#ffffff" d="${maskPath}"/>`;
+  }
+  const applyGradient = includeGradient && gradientKey && gradientKey !== 'none';
+  const gradientInfo = applyGradient && maskMarkup
+    ? buildGradientOverlayElements(svgW, svgH, gradientKey, maskMarkup)
+    : null;
+  if(gradientInfo){
+    defsParts.push(gradientInfo.defs);
+    body += gradientInfo.overlay;
+  }
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(defsParts.length){
+    svg += `<defs>${defsParts.join('')}</defs>`;
+  }
+  svg += body;
   svg += '</svg>';
   return svg;
 }
 
-function buildAsciiSVGString(frame, options){
+function buildAsciiSVGString(frame, options, includeGradient = true){
   const width = Math.max(1, Math.round(frame.outputWidth || (frame.gridWidth * (frame.tile || 1))));
   const height = Math.max(1, Math.round(frame.outputHeight || (frame.gridHeight * (frame.tile || 1))));
   const cellWidth = width / Math.max(1, frame.gridWidth);
@@ -2795,14 +3253,34 @@ function buildAsciiSVGString(frame, options){
   });
   const usesPerGlyphFill = asciiElements.usesPerGlyphFill;
   const textMarkup = asciiElements.textMarkup;
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+  const gradientKey = includeGradient ? (frame.gradient || options.gradientMap || 'none') : 'none';
+  const defsParts = [];
+  let body = '';
   if(options.bg && options.bg !== 'transparent'){
-    svg += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
+    body += `<rect width="100%" height="100%" fill="${options.bg}"/>`;
   }
   if(asciiElements.backgroundMarkup){
-    svg += asciiElements.backgroundMarkup;
+    body += asciiElements.backgroundMarkup;
   }
+  const maskMarkup = [
+    options.bg && options.bg !== 'transparent' ? '<rect width="100%" height="100%" fill="#ffffff"/>' : '',
+    asciiElements.maskBackgroundMarkup || '',
+    asciiElements.maskTextMarkup || ''
+  ].join('');
+  const hasMask = maskMarkup && maskMarkup.trim().length > 0;
   if(!textMarkup){
+    const gradientInfo = hasMask && gradientKey !== 'none'
+      ? buildGradientOverlayElements(width, height, gradientKey, maskMarkup)
+      : null;
+    if(gradientInfo){
+      defsParts.push(gradientInfo.defs);
+      body += gradientInfo.overlay;
+    }
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+    if(defsParts.length){
+      svg += `<defs>${defsParts.join('')}</defs>`;
+    }
+    svg += body;
     svg += '</svg>';
     return svg;
   }
@@ -2814,22 +3292,34 @@ function buildAsciiSVGString(frame, options){
     const glowRGB = lightenColor(fgRGB, 0.4);
     const blurRadius = Math.max(0.2, Math.sqrt(cellWidth*cellWidth + cellHeight*cellHeight) * (0.4 + glowAmount/90));
     const glowOpacity = Math.min(1, 0.18 + glowAmount/120);
-    svg += `<defs><filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter></defs>`;
-    svg += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
+    defsParts.push(`<filter id="asciiGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="${formatNumber(blurRadius)}" result="blur"/></filter>`);
+    body += `<g filter="url(#asciiGlow)" opacity="${formatNumber(glowOpacity)}" fill="rgb(${glowRGB[0]},${glowRGB[1]},${glowRGB[2]})" font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0">${textMarkup}</g>`;
   }
   const groupAttrs = `font-family="${ASCII_FONT_STACK}" font-size="${formatNumber(fontSize)}" letter-spacing="0"`;
   if(usesPerGlyphFill){
-    svg += `<g ${groupAttrs}>${textMarkup}</g>`;
+    body += `<g ${groupAttrs}>${textMarkup}</g>`;
   }else{
-    svg += `<g fill="${fgColor}" ${groupAttrs}>${textMarkup}</g>`;
+    body += `<g fill="${fgColor}" ${groupAttrs}>${textMarkup}</g>`;
   }
+  const gradientInfo = hasMask && gradientKey !== 'none'
+    ? buildGradientOverlayElements(width, height, gradientKey, maskMarkup)
+    : null;
+  if(gradientInfo){
+    defsParts.push(gradientInfo.defs);
+    body += gradientInfo.overlay;
+  }
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+  if(defsParts.length){
+    svg += `<defs>${defsParts.join('')}</defs>`;
+  }
+  svg += body;
   svg += '</svg>';
   return svg;
 }
 
 function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
   if(!lines || !lines.length){
-    return {textMarkup: '', backgroundMarkup: '', usesPerGlyphFill: false};
+    return {textMarkup: '', backgroundMarkup: '', maskBackgroundMarkup: '', maskTextMarkup: '', usesPerGlyphFill: false};
   }
   const gridWidth = Math.max(0, options.gridWidth || (lines[0] ? lines[0].length : 0));
   const colorArray = options.colors && gridWidth
@@ -2849,6 +3339,7 @@ function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
   const asciiPixelLight = options.asciiPixelLight || 'rgba(245,245,245,0.95)';
   const asciiPixelDark = options.asciiPixelDark || 'rgba(16,16,16,0.88)';
   let textMarkup = '';
+  let maskTextMarkup = '';
   for(let y=0;y<lines.length;y++){
     const line = lines[y];
     if(!line) continue;
@@ -2886,12 +3377,16 @@ function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
         }
         fillAttr = ` fill="${fill}"`;
       }
-      textMarkup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
+      const textEntry = `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle"${fillAttr}>${escapeXML(ch)}</text>`;
+      textMarkup += textEntry;
+      maskTextMarkup += `<text x="${formatNumber(baseX)}" y="${formatNumber(baseY)}" text-anchor="middle" dominant-baseline="middle" fill="#ffffff">${escapeXML(ch)}</text>`;
     }
   }
   let backgroundMarkup = '';
+  let maskBackgroundMarkup = '';
   if(asciiPixel && hasColors && gridWidth > 0){
     const pathMap = new Map();
+    let maskPath = '';
     const buildEntry = (colorKey) => {
       let entry = pathMap.get(colorKey);
       if(!entry){
@@ -2918,6 +3413,7 @@ function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
         const rectX = start * stepX;
         const rectY = y * stepY;
         entry.path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(rectHeight)}h-${formatNumber(rectWidth)}z`;
+        maskPath += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(rectHeight)}h-${formatNumber(rectWidth)}z`;
       };
       for(let x=0;x<=gridWidth;x++){
         let colorKey = -1;
@@ -2938,29 +3434,35 @@ function asciiLinesToSVGElements(lines, cellWidth, cellHeight, options={}){
     pathMap.forEach((entry) => {
       backgroundMarkup += `<path fill="rgb(${entry.r},${entry.g},${entry.b})" d="${entry.path}"/>`;
     });
+    if(maskPath){
+      maskBackgroundMarkup = `<path fill="#ffffff" d="${maskPath}"/>`;
+    }
   }
   return {
     textMarkup,
     backgroundMarkup,
+    maskBackgroundMarkup,
+    maskTextMarkup,
     usesPerGlyphFill: asciiPixel || hasColors
   };
 }
 
-function buildExportSVG(result, options){
+function buildExportSVG(result, options, includeGradient = true){
   if(!result) return '';
   const frame = createFrameData(result, options);
   if(!frame) return '';
   const tile = frame.tile != null ? frame.tile : Math.max(1, options.px);
+  const gradientKey = includeGradient ? (frame.gradient || options.gradientMap || 'none') : 'none';
   if(frame.kind === 'ascii'){
-    return buildAsciiSVGString(frame, options);
+    return buildAsciiSVGString(frame, {...options, gradientMap: gradientKey}, includeGradient);
   }
   if(frame.kind === 'thermal'){
-    return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg, frame.paletteKey);
+    return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg, frame.paletteKey, gradientKey, includeGradient);
   }
   if(frame.kind === 'advanced-base'){
-    return buildAdvancedBaseSVG(frame, tile, options);
+    return buildAdvancedBaseSVG({...frame, gradient: gradientKey}, tile, {...options, gradientMap: gradientKey}, includeGradient);
   }
-  return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
+  return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow}, gradientKey, includeGradient);
 }
 
 function buildMaskPathData(mask, width, height, tile){
@@ -2974,7 +3476,7 @@ function buildMaskPathData(mask, width, height, tile){
   return path;
 }
 
-function buildAdvancedBaseSVG(frame, tile, options){
+function buildAdvancedBaseSVG(frame, tile, options, includeGradient = true){
   const width = Math.max(1, frame.gridWidth || 0);
   const height = Math.max(1, frame.gridHeight || 0);
   const unit = tile || 1;
@@ -2983,10 +3485,14 @@ function buildAdvancedBaseSVG(frame, tile, options){
   const tonal = frame.tonal ? ensureUint8Array(frame.tonal) : null;
   const colors = frame.colors ? ensureUint8Array(frame.colors) : null;
   const hasColors = colors && colors.length >= width * height * 3;
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
   const bg = options.bg;
+  const gradientKey = includeGradient ? (frame.gradient || options.gradientMap || 'none') : 'none';
+  const defsParts = [];
+  let body = '';
+  let maskMarkup = '';
   if(bg && bg !== 'transparent'){
-    svg += `<rect width="100%" height="100%" fill="${escapeXML(bg)}"/>`;
+    body += `<rect width="100%" height="100%" fill="${escapeXML(bg)}"/>`;
+    maskMarkup += `<rect width="100%" height="100%" fill="#ffffff"/>`;
   }
   const stepX = unit;
   const stepY = unit;
@@ -3008,9 +3514,23 @@ function buildAdvancedBaseSVG(frame, tile, options){
       }
       const rectX = x * stepX;
       const rectY = y * stepY;
-      svg += `<rect x="${formatNumber(rectX)}" y="${formatNumber(rectY)}" width="${formatNumber(stepX)}" height="${formatNumber(stepY)}" fill="${fill}"/>`;
+      body += `<rect x="${formatNumber(rectX)}" y="${formatNumber(rectY)}" width="${formatNumber(stepX)}" height="${formatNumber(stepY)}" fill="${fill}"/>`;
+      maskMarkup += `<rect x="${formatNumber(rectX)}" y="${formatNumber(rectY)}" width="${formatNumber(stepX)}" height="${formatNumber(stepY)}" fill="#ffffff"/>`;
     }
   }
+  const applyGradient = includeGradient && gradientKey && gradientKey !== 'none';
+  const gradientInfo = applyGradient && maskMarkup
+    ? buildGradientOverlayElements(svgW, svgH, gradientKey, maskMarkup)
+    : null;
+  if(gradientInfo){
+    defsParts.push(gradientInfo.defs);
+    body += gradientInfo.overlay;
+  }
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  if(defsParts.length){
+    svg += `<defs>${defsParts.join('')}</defs>`;
+  }
+  svg += body;
   svg += '</svg>';
   return svg;
 }
@@ -3129,7 +3649,8 @@ function drawAnimationFrame(player, index){
     type: frame.type || frame.kind,
     bg: player.data.bg,
     fg: player.data.fg,
-    glow: player.data.glow
+    glow: player.data.glow,
+    gradient: frame.gradient || player.data.gradient || state.gradientMap
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
   const cpuVideo = isCpuVideoPreview(player);
@@ -3215,6 +3736,7 @@ let cpuVideoHelperCtx = null;
 function paintFrame(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   const type = data.type || data.kind || (data.mask ? 'mask' : 'ascii');
+  const gradientKey = typeof data.gradient === 'string' ? data.gradient : (state.gradientMap || 'none');
   if(type === 'bitmap'){
     paintBitmapFrame(ctx, data, outWidth, outHeight);
   }else if(type === 'image-data'){
@@ -3228,6 +3750,44 @@ function paintFrame(ctx, data, outWidth, outHeight){
   }else{
     paintMask(ctx, data, outWidth, outHeight);
   }
+  if(gradientKey && gradientKey !== 'none' && type !== 'advanced-base'){
+    applyGradientOverlay(ctx, gradientKey, outWidth, outHeight);
+  }
+}
+
+function paintBitmapFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const source = data.bitmap || data.image || data.canvas;
+  if(source){
+    ctx.drawImage(source, 0, 0, outWidth, outHeight);
+  }
+  ctx.restore();
+}
+
+function paintImageDataFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data || !data.imageData) return;
+  const imageData = data.imageData;
+  const width = imageData.width;
+  const height = imageData.height;
+  if(!width || !height) return;
+  if(!imageFrameCanvas || imageFrameCanvas.width !== width || imageFrameCanvas.height !== height){
+    imageFrameCanvas = document.createElement('canvas');
+    imageFrameCanvas.width = width;
+    imageFrameCanvas.height = height;
+    imageFrameCtx = imageFrameCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if(!imageFrameCtx) return;
+  imageFrameCtx.putImageData(imageData, 0, 0);
+  paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
 }
 
 function paintBitmapFrame(ctx, data, outWidth, outHeight){
@@ -3768,20 +4328,29 @@ function wait(ms){
 }
 
 async function downloadSVG(){
-  const svgString = ensureSVGString();
+  const svgString = ensureSVGString(true);
   if(!svgString) return;
   const blob = new Blob([svgString], {type:'image/svg+xml'});
   triggerDownload(blob, 'bitmap.svg');
 }
 
 async function downloadRaster(format){
-  const svgString = ensureSVGString();
+  const svgString = ensureSVGString(false);
   if(!svgString) return;
   const dims = getExportDimensions();
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
   const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
-  await applyAdvancedDitherToCanvas(canvas, { preview: false });
+  const gradientSelection = state.gradientMap;
+  const effects = buildAdvancedDitherChain();
+  if(effects.length){
+    await applyAdvancedDitherToCanvas(canvas, { preview: false, effects, gradient: gradientSelection });
+  }else if(gradientSelection && gradientSelection !== 'none'){
+    const ctx = canvas.getContext('2d');
+    if(ctx){
+      applyGradientOverlay(ctx, gradientSelection, canvas.width, canvas.height);
+    }
+  }
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
@@ -3858,7 +4427,7 @@ async function downloadMP4(){
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, dims.width, dims.height);
     paintFrame(ctx, frameData, dims.width, dims.height);
-    await applyAdvancedDitherToCanvas(canvas, { preview: false });
+    await applyAdvancedDitherToCanvas(canvas, { preview: false, gradient: options.gradientMap });
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
   }
@@ -3988,7 +4557,7 @@ function renderAsciiFrameImageData(frame, outWidth, outHeight, options, override
       frame.gridHeight,
       getASCIICharset(charsetKey, charsetSource)
     );
-  paintAscii(ctx, {
+  paintFrame(ctx, {
     type: 'ascii',
     lines,
     gridWidth: frame.gridWidth,
@@ -3998,7 +4567,8 @@ function renderAsciiFrameImageData(frame, outWidth, outHeight, options, override
     bg: overrides.bg != null ? overrides.bg : (options && options.bg != null ? options.bg : 'transparent'),
     fg: overrides.fg != null ? overrides.fg : (options && options.fg != null ? options.fg : '#ffffff'),
     glow: overrides.glow != null ? overrides.glow : 0,
-    colors: frame.colors
+    colors: frame.colors,
+    gradient: frame.gradient || (options && options.gradientMap)
   }, width, height);
   return ctx.getImageData(0, 0, width, height);
 }
@@ -4038,10 +4608,11 @@ async function frameToIndexedFrame(frame, outWidth, outHeight, options){
         type: frame.kind,
         bg: options && options.bg != null ? options.bg : 'transparent',
         fg: options && options.fg != null ? options.fg : '#000000',
-        glow: options && options.glow != null ? options.glow : 0
+        glow: options && options.glow != null ? options.glow : 0,
+        gradient: frame.gradient || (options && options.gradientMap)
       };
       paintFrame(ctx, frameData, width, height);
-      await applyAdvancedDitherToCanvas(canvas, { preview: false });
+      await applyAdvancedDitherToCanvas(canvas, { preview: false, gradient: frameData.gradient || (options && options.gradientMap) });
       let imageData = null;
       try{
         imageData = ctx.getImageData(0, 0, width, height);
@@ -4559,16 +5130,20 @@ function getExportDimensions(){
   return dims;
 }
 
-function ensureSVGString(){
+function ensureSVGString(includeGradient = true){
   if(!state.lastResult || state.lastResult.type !== 'image' || !state.lastResult.frame){
     return '';
   }
-  if(state.lastSVG && state.lastSVGJob === state.lastResultId){
-    return state.lastSVG;
+  const cacheKey = includeGradient ? 'gradient' : 'base';
+  if(state.lastSVGJob === state.lastResultId && state.lastSVGCache && state.lastSVGCache[cacheKey]){
+    return state.lastSVGCache[cacheKey];
   }
-  const svgString = buildExportSVG(state.lastResult.frame, state.lastResult.options);
-  state.lastSVG = svgString;
-  state.lastSVGJob = state.lastResultId;
+  if(state.lastSVGJob !== state.lastResultId || !state.lastSVGCache){
+    state.lastSVGCache = { base: '', gradient: '' };
+    state.lastSVGJob = state.lastResultId;
+  }
+  const svgString = buildExportSVG(state.lastResult.frame, state.lastResult.options, includeGradient);
+  state.lastSVGCache[cacheKey] = svgString;
   return svgString;
 }
 
