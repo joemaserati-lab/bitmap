@@ -115,6 +115,7 @@ hr{border:0;border-top:1px solid #eee;margin:0;flex:0 0 auto;align-self:stretch;
 }
 
 .dither-advanced{margin-top:8px;padding:12px;border:1px solid rgba(0,0,0,0.08);border-radius:12px;background:rgba(0,0,0,0.03);display:grid;gap:10px}
+.dither-advanced.is-locked{opacity:.5;pointer-events:none}
 .dither-advanced__controls{display:grid;gap:10px}
 .dither-advanced .field{background:rgba(255,255,255,0.7);border-color:rgba(0,0,0,0.08)}
 .dither-advanced .field label{color:#333;font-size:11px}

@@ -1,6 +1,8 @@
-import { applyToCanvas } from './postfx.js';
+import { applyToCanvas, runPostEffects } from './postfx.js';
 import { ensureEffect } from './effects/index.js';
 import { computeExportBaseSize } from './exportSizing.mjs';
+import { CPU_ONLY_EFFECTS } from './constants.js';
+import { captureVideoFrameImageData } from './utils/video.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -46,19 +48,7 @@ const ASCII_MIN_TILE = 8;
 const ASCII_CUSTOM_MAX = 64;
 const ASCII_WORD_MAX = 32;
 const ADVANCED_VIDEO_NOTICE = 'RIPRODUZIONE VIDEO LIMITATA: QUESTO DITHERING AVANZATO È VISIBILE SOLO IN PAUSA ED È SEMPRE APPLICATO IN EXPORT.';
-const CPU_ONLY_ADVANCED_DITHERS = new Set([
-  'blueNoise',
-  'clusteredDot',
-  'dotDiffusion',
-  'edKernels',
-  'paletteDither',
-  'autoQuant',
-  'cmykHalftone',
-  'halftoneShapes',
-  'lineDither',
-  'hatching',
-  'stippling'
-]);
+const CPU_ONLY_ADVANCED_DITHERS = new Set(CPU_ONLY_EFFECTS);
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
@@ -332,7 +322,9 @@ const state = {
   advancedDitherActiveCanvas: null,
   advancedDitherPreviewTokens: new WeakMap(),
   advancedDitherJobCounter: 0,
-  previewDisposables: []
+  previewDisposables: [],
+  advancedControlsLocked: false,
+  previewDefaultNotice: ''
 };
 
 function disposePreviewAssets(){
@@ -347,6 +339,24 @@ function disposePreviewAssets(){
     }
   }
   state.previewDisposables = [];
+}
+
+function disposeVideoPlayback(videoData){
+  if(!videoData) return;
+  const el = videoData.playbackElement;
+  if(el){
+    try{ el.pause(); }catch(err){ /* ignore */ }
+    el.removeAttribute('src');
+    if(typeof el.load === 'function'){
+      try{ el.load(); }catch(err){ /* ignore */ }
+    }
+  }
+  if(videoData.playbackUrl){
+    try{ URL.revokeObjectURL(videoData.playbackUrl); }catch(err){ /* ignore */ }
+  }
+  if(typeof videoData.disposePlayback === 'function'){
+    try{ videoData.disposePlayback(); }catch(err){ console.warn('[video] cleanup failed', err); }
+  }
 }
 
 function updatePreviewNotice(message){
@@ -1037,6 +1047,34 @@ function updateAdvancedDitherVisibility(){
   }
 }
 
+function setAdvancedControlsLocked(locked){
+  if(state.advancedControlsLocked === locked){
+    return;
+  }
+  state.advancedControlsLocked = locked;
+  const panel = $('ditherAdvancedPanel');
+  if(panel){
+    if(locked){
+      panel.classList.add('is-locked');
+      panel.setAttribute('aria-disabled','true');
+    }else{
+      panel.classList.remove('is-locked');
+      panel.removeAttribute('aria-disabled');
+    }
+  }
+  for(const refs of state.advancedDitherControls.values()){
+    for(const ref of refs.params.values()){
+      if(!ref || !ref.input) continue;
+      ref.input.disabled = locked;
+      if(locked){
+        ref.input.setAttribute('aria-disabled','true');
+      }else{
+        ref.input.removeAttribute('aria-disabled');
+      }
+    }
+  }
+}
+
 function syncAdvancedDitherControls(id){
   const refs = state.advancedDitherControls.get(id);
   const settings = state.advancedDitherSettings[id];
@@ -1168,6 +1206,120 @@ function isAdvancedDitherMode(mode){
 
 function isCpuOnlyAdvancedDither(mode){
   return CPU_ONLY_ADVANCED_DITHERS.has(mode);
+}
+
+function isCpuVideoPreview(player){
+  if(state.sourceKind !== 'video' || !player){
+    return false;
+  }
+  const mode = controls.dither ? controls.dither.value : 'none';
+  return player.disableAdvancedPreview && isCpuOnlyAdvancedDither(mode);
+}
+
+function ensureCpuVideoHelper(width, height){
+  if(!cpuVideoHelperCanvas){
+    cpuVideoHelperCanvas = document.createElement('canvas');
+  }
+  if(cpuVideoHelperCanvas.width !== width || cpuVideoHelperCanvas.height !== height){
+    cpuVideoHelperCanvas.width = width;
+    cpuVideoHelperCanvas.height = height;
+    cpuVideoHelperCtx = null;
+  }
+  if(!cpuVideoHelperCtx){
+    cpuVideoHelperCtx = cpuVideoHelperCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  return cpuVideoHelperCtx ? { canvas: cpuVideoHelperCanvas, ctx: cpuVideoHelperCtx } : null;
+}
+
+function getVideoFrameTime(player, index){
+  if(!player) return 0;
+  if(Array.isArray(player.frameTimes) && player.frameTimes.length){
+    const clamped = Math.max(0, Math.min(index, player.frameTimes.length - 1));
+    return player.frameTimes[clamped];
+  }
+  const durations = Array.isArray(player.data && player.data.durations) ? player.data.durations : [];
+  if(!durations.length){
+    return 0;
+  }
+  let total = 0;
+  const limit = Math.max(0, Math.min(index, durations.length - 1));
+  for(let i=0;i<limit;i++){
+    total += Math.max(0, durations[i] || 0);
+  }
+  return total / 1000;
+}
+
+async function scheduleCpuVideoPreview(player, index){
+  if(!player || !player.canvas) return;
+  const effects = buildAdvancedDitherChain();
+  if(!effects.length){
+    return;
+  }
+  const canvas = player.canvas;
+  state.advancedDitherActiveCanvas = canvas;
+  const token = ++state.advancedDitherJobCounter;
+  state.advancedDitherPreviewTokens.set(canvas, token);
+  const videoEl = player.videoEl;
+  try{
+    if(videoEl){
+      const targetTime = getVideoFrameTime(player, index);
+      if(Number.isFinite(targetTime)){
+        try{
+          const delta = Math.abs((videoEl.currentTime || 0) - targetTime);
+          if(delta > 0.0005){
+            await seekVideo(videoEl, targetTime);
+          }
+        }catch(err){
+          console.warn('[video] seek failed', err);
+        }
+      }
+      const imageData = await captureVideoFrameImageData(videoEl, 3000);
+      if(state.advancedDitherPreviewTokens.get(canvas) !== token){
+        return;
+      }
+      const processed = await runPostEffects(imageData, effects, { preview: true });
+      if(state.advancedDitherPreviewTokens.get(canvas) !== token){
+        return;
+      }
+      const helper = ensureCpuVideoHelper(processed.width, processed.height);
+      if(helper && helper.ctx){
+        helper.ctx.putImageData(processed, 0, 0);
+        const ctx = player.ctx;
+        if(ctx){
+          ctx.save();
+          try{
+            if(typeof ctx.resetTransform === 'function'){
+              ctx.resetTransform();
+            }else{
+              ctx.setTransform(1,0,0,1,0,0);
+            }
+            if(player.dpr && player.dpr !== 1){
+              ctx.scale(player.dpr, player.dpr);
+            }
+            ctx.imageSmoothingEnabled = false;
+            const bg = player.data && player.data.bg;
+            if(bg && bg !== 'transparent'){
+              ctx.fillStyle = bg;
+              ctx.fillRect(0, 0, player.width, player.height);
+            }else{
+              ctx.clearRect(0, 0, player.width, player.height);
+            }
+            ctx.drawImage(helper.canvas, 0, 0, player.width, player.height);
+          }finally{
+            ctx.restore();
+          }
+        }
+      }
+    }else{
+      await applyAdvancedDitherToCanvas(canvas, { preview: true, token, maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION });
+    }
+  }catch(err){
+    console.warn('[video] advanced preview failed', err);
+  }finally{
+    if(state.advancedDitherPreviewTokens.get(canvas) === token){
+      state.advancedDitherPreviewTokens.delete(canvas);
+    }
+  }
 }
 
 function parsePaletteValue(value, fallback){
@@ -1440,11 +1592,19 @@ async function loadGifAsset(file){
 
 async function decodeVideoElementFrames(file){
   const url = URL.createObjectURL(file);
+  const playbackUrl = URL.createObjectURL(file);
   const video = document.createElement('video');
   video.src = url;
   video.preload = 'auto';
   video.muted = true;
   video.playsInline = true;
+  const playbackEl = document.createElement('video');
+  playbackEl.src = playbackUrl;
+  playbackEl.preload = 'auto';
+  playbackEl.muted = true;
+  playbackEl.playsInline = true;
+  let playbackReady = null;
+  let success = false;
   try{
     await waitForVideo(video, 'loadedmetadata');
     const width = video.videoWidth || 1;
@@ -1468,8 +1628,17 @@ async function decodeVideoElementFrames(file){
       durations.push(Math.round(Math.max(16, interval * 1000)));
       updateUploadProgress((i+1)/frameCount);
     }
+    playbackReady = waitForVideo(playbackEl, 'loadeddata').catch(() => {});
     const totalDuration = durations.reduce((sum, val) => sum + val, 0) || (frameCount * 1000/VIDEO_PREVIEW_FPS);
     const fps = totalDuration > 0 ? (frameCount / (totalDuration/1000)) : VIDEO_PREVIEW_FPS;
+    if(playbackReady){
+      await playbackReady;
+      try{
+        playbackEl.pause();
+        playbackEl.currentTime = 0;
+      }catch(err){ /* ignore */ }
+    }
+    success = true;
     return {
       type: 'video',
       exportWidth: exportDims.width,
@@ -1481,12 +1650,17 @@ async function decodeVideoElementFrames(file){
       previewFPS: fps,
       exportFPS: fps,
       frameCount,
-      durationMs: totalDuration
+      durationMs: totalDuration,
+      playbackElement: playbackEl,
+      playbackUrl
     };
   }finally{
     video.pause();
     video.removeAttribute('src');
     URL.revokeObjectURL(url);
+    if(!success){
+      disposeVideoPlayback({ playbackElement: playbackEl, playbackUrl });
+    }
   }
 }
 
@@ -1560,6 +1734,7 @@ function captureVideoFrame(video, width, height){
 function setSourceCanvas(canvas, name){
   stopPreviewAnimation();
   disposePreviewAssets();
+  disposeVideoPlayback(state.videoSource);
   state.sourceKind = 'image';
   state.videoSource = null;
   state.sourceCanvas = canvas;
@@ -1602,6 +1777,7 @@ function setSourceVideo(videoData, name){
   if(!videoData) return;
   stopPreviewAnimation();
   disposePreviewAssets();
+  disposeVideoPlayback(state.videoSource);
   state.sourceKind = 'video';
   state.videoSource = videoData;
   state.sourceCanvas = null;
@@ -1930,8 +2106,9 @@ async function generateVideoPreview(options){
     video.previewFPS || VIDEO_PREVIEW_FPS,
     {
       disableAdvancedPreview: cpuOnlyAdvanced,
-      autoplay: !cpuOnlyAdvanced,
-      notice: cpuOnlyAdvanced ? ADVANCED_VIDEO_NOTICE : ''
+      autoplay: true,
+      notice: cpuOnlyAdvanced ? ADVANCED_VIDEO_NOTICE : '',
+      videoElement: video.playbackElement
     }
   );
   disposePreviewAssets();
@@ -2270,6 +2447,8 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
   const disableAdvancedPreview = Boolean(extras.disableAdvancedPreview);
   const autoplay = extras.autoplay !== undefined ? !!extras.autoplay : true;
   const notice = typeof extras.notice === 'string' ? extras.notice : '';
+  const hasVideoClass = typeof HTMLVideoElement !== 'undefined';
+  const videoElement = hasVideoClass && extras.videoElement instanceof HTMLVideoElement ? extras.videoElement : null;
   const hasAdvancedFrames = frames.some((frame) => frame && frame.kind === 'advanced-base');
   const advancedChain = disableAdvancedPreview ? [] : buildAdvancedDitherChain();
   const needsAdvanced = hasAdvancedFrames && advancedChain.length > 0;
@@ -2384,6 +2563,12 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
     });
   }
   const effectiveDurations = durations.slice(0, previewFrames.length);
+  const frameTimes = [];
+  let accumulated = 0;
+  for(let i=0;i<effectiveDurations.length;i++){
+    frameTimes.push(accumulated / 1000);
+    accumulated += Math.max(0, effectiveDurations[i] || 0);
+  }
   const total = effectiveDurations.reduce((sum, val) => sum + val, 0) || (previewFrames.length * 1000/VIDEO_PREVIEW_FPS);
   const derivedFPS = total > 0 ? (previewFrames.length / (total/1000)) : (fps || VIDEO_PREVIEW_FPS);
   return {
@@ -2399,7 +2584,9 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
     disposables,
     disableAdvancedPreview,
     autoplay,
-    notice
+    notice,
+    videoElement,
+    frameTimes
   };
 }
 
@@ -2746,6 +2933,7 @@ function stopPreviewAnimation(){
   }
   state.previewPlayer = null;
   updatePlaybackButton(false);
+  setAdvancedControlsLocked(false);
 }
 
 function updatePlaybackButton(show, playing){
@@ -2790,7 +2978,11 @@ function startPreviewAnimation(canvas, data, width, height, dpr){
     rafId: 0,
     width,
     height,
-    disableAdvancedPreview: Boolean(data.disableAdvancedPreview)
+    disableAdvancedPreview: Boolean(data.disableAdvancedPreview),
+    videoEl: data.videoElement || null,
+    frameTimes: Array.isArray(data.frameTimes) ? data.frameTimes.slice() : [],
+    dpr,
+    noticeMessage: typeof data.notice === 'string' ? data.notice : ''
   };
   state.previewPlayer = player;
   updatePlaybackButton(true, autoplay);
@@ -2828,19 +3020,38 @@ function drawAnimationFrame(player, index){
     glow: player.data.glow
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
+  const cpuVideo = isCpuVideoPreview(player);
   if(frameData.type === 'advanced-base'){
-    if(player.disableAdvancedPreview && player.playing){
+    if(cpuVideo){
+      if(player.playing){
+        updatePreviewNotice(player.noticeMessage || ADVANCED_VIDEO_NOTICE);
+        setAdvancedControlsLocked(true);
+        clearAdvancedDitherPreview(player.canvas);
+      }else{
+        setAdvancedControlsLocked(false);
+        updatePreviewNotice('');
+        scheduleCpuVideoPreview(player, index);
+      }
+    }else if(player.disableAdvancedPreview && player.playing){
+      setAdvancedControlsLocked(false);
+      updatePreviewNotice(state.previewDefaultNotice || '');
       clearAdvancedDitherPreview(player.canvas);
     }else{
+      setAdvancedControlsLocked(false);
+      updatePreviewNotice(state.previewDefaultNotice || '');
       scheduleAdvancedDitherPreview(player.canvas);
     }
   }else{
+    setAdvancedControlsLocked(false);
+    updatePreviewNotice(state.previewDefaultNotice || '');
     clearAdvancedDitherPreview(player.canvas);
   }
 }
 
 function renderPreview(previewData, scale){
-  updatePreviewNotice(previewData && previewData.notice ? previewData.notice : '');
+  const noticeMessage = previewData && previewData.notice ? previewData.notice : '';
+  state.previewDefaultNotice = noticeMessage;
+  updatePreviewNotice(noticeMessage);
   if(!preview) return;
   preview.innerHTML = '';
   stopPreviewAnimation();
@@ -2886,6 +3097,8 @@ let glowHelperCanvas = null;
 let glowHelperCtx = null;
 let imageFrameCanvas = null;
 let imageFrameCtx = null;
+let cpuVideoHelperCanvas = null;
+let cpuVideoHelperCtx = null;
 
 function paintFrame(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
