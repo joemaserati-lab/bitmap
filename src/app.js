@@ -314,8 +314,23 @@ const state = {
   advancedDitherControls: new Map(),
   advancedDitherActiveCanvas: null,
   advancedDitherPreviewTokens: new WeakMap(),
-  advancedDitherJobCounter: 0
+  advancedDitherJobCounter: 0,
+  previewDisposables: []
 };
+
+function disposePreviewAssets(){
+  const disposables = state.previewDisposables || [];
+  if(disposables.length){
+    for(const dispose of disposables){
+      try{
+        dispose();
+      }catch(err){
+        console.warn('[preview] cleanup failed', err);
+      }
+    }
+  }
+  state.previewDisposables = [];
+}
 
 let renderQueued = false;
 let renderTimer = null;
@@ -1110,6 +1125,14 @@ function scheduleAdvancedDitherPreview(canvas){
   });
 }
 
+function clearAdvancedDitherPreview(canvas){
+  if(!canvas) return;
+  state.advancedDitherPreviewTokens.delete(canvas);
+  if(state.advancedDitherActiveCanvas === canvas){
+    state.advancedDitherActiveCanvas = null;
+  }
+}
+
 function isAdvancedDitherMode(mode){
   return Boolean(getAdvancedDitherDefinition(mode));
 }
@@ -1503,6 +1526,7 @@ function captureVideoFrame(video, width, height){
 
 function setSourceCanvas(canvas, name){
   stopPreviewAnimation();
+  disposePreviewAssets();
   state.sourceKind = 'image';
   state.videoSource = null;
   state.sourceCanvas = canvas;
@@ -1544,6 +1568,7 @@ function setSourceCanvas(canvas, name){
 function setSourceVideo(videoData, name){
   if(!videoData) return;
   stopPreviewAnimation();
+  disposePreviewAssets();
   state.sourceKind = 'video';
   state.videoSource = videoData;
   state.sourceCanvas = null;
@@ -1806,7 +1831,9 @@ async function generate(){
   state.lastSVG = '';
   state.lastSVGJob = 0;
   const previewData = buildPreviewData(frameData, options);
+  disposePreviewAssets();
   state.lastPreview = previewData;
+  state.previewDisposables = [];
   const previewWidth = previewData ? previewData.width : 0;
   const previewHeight = previewData ? previewData.height : 0;
   state.lastSize = {width: previewWidth, height: previewHeight};
@@ -1818,10 +1845,13 @@ async function generate(){
 }
 
 async function generateVideoPreview(options){
+  stopPreviewAnimation();
   const video = state.videoSource;
   if(!video || !video.previewFrames || !video.previewFrames.length){
     state.lastResult = null;
     state.lastPreview = null;
+    disposePreviewAssets();
+    state.previewDisposables = [];
     state.lastSVG = '';
     state.lastSVGJob = 0;
     state.lastSize = {width: 0, height: 0};
@@ -1858,8 +1888,10 @@ async function generateVideoPreview(options){
   state.lastResultId = state.currentJobId;
   state.lastSVG = '';
   state.lastSVGJob = 0;
-  const previewData = buildAnimationPreviewData(frames, options, durations, video.previewFPS || VIDEO_PREVIEW_FPS);
+  const previewData = await buildAnimationPreviewData(frames, options, durations, video.previewFPS || VIDEO_PREVIEW_FPS);
+  disposePreviewAssets();
   state.lastPreview = previewData;
+  state.previewDisposables = previewData && previewData.disposables ? previewData.disposables : [];
   const previewWidth = previewData ? previewData.width : 0;
   const previewHeight = previewData ? previewData.height : 0;
   state.lastSize = {width: previewWidth, height: previewHeight};
@@ -2181,17 +2213,84 @@ function buildPreviewData(frame, options){
   };
 }
 
-function buildAnimationPreviewData(frames, options, durations, fps){
+async function buildAnimationPreviewData(frames, options, durations, fps){
   if(!frames || !frames.length){
     return null;
   }
   const first = frames[0];
   const width = Math.max(1, Math.round(first.outputWidth));
   const height = Math.max(1, Math.round(first.outputHeight));
-  const previewFrames = frames.map((frame) => ({
-    ...frame,
-    type: frame.kind
-  }));
+  const previewFrames = [];
+  const disposables = [];
+  const hasAdvancedFrames = frames.some((frame) => frame && frame.kind === 'advanced-base');
+  const needsAdvanced = hasAdvancedFrames && buildAdvancedDitherChain().length > 0;
+  let renderCanvas = null;
+  let renderCtx = null;
+  const alpha = !options.bg || options.bg === 'transparent';
+  for(const frame of frames){
+    if(needsAdvanced && frame && frame.kind === 'advanced-base'){
+      if(!renderCanvas){
+        renderCanvas = createExportCanvas(width, height, {forceDOM: true});
+        renderCtx = renderCanvas.getContext('2d', {alpha});
+      }
+      if(renderCtx){
+        if(typeof renderCtx.resetTransform === 'function'){
+          renderCtx.resetTransform();
+        }else{
+          renderCtx.setTransform(1, 0, 0, 1, 0, 0);
+        }
+        paintFrame(renderCtx, {
+          ...frame,
+          type: frame.kind,
+          bg: options.bg,
+          fg: options.fg,
+          glow: options.glow
+        }, width, height);
+        await applyAdvancedDitherToCanvas(renderCanvas, { preview: true });
+        let bitmap = null;
+        if(typeof createImageBitmap === 'function'){
+          try{
+            bitmap = await createImageBitmap(renderCanvas);
+          }catch(err){
+            bitmap = null;
+          }
+        }
+        if(bitmap){
+          disposables.push(() => {
+            if(bitmap && typeof bitmap.close === 'function'){
+              bitmap.close();
+            }
+          });
+          previewFrames.push({
+            ...frame,
+            kind: 'bitmap',
+            type: 'bitmap',
+            bitmap
+          });
+          continue;
+        }
+        let imageData = null;
+        try{
+          imageData = renderCtx.getImageData(0, 0, width, height);
+        }catch(err){
+          imageData = null;
+        }
+        if(imageData){
+          previewFrames.push({
+            ...frame,
+            kind: 'bitmap',
+            type: 'image-data',
+            imageData
+          });
+          continue;
+        }
+      }
+    }
+    previewFrames.push({
+      ...frame,
+      type: frame ? frame.kind : undefined
+    });
+  }
   const effectiveDurations = durations.slice(0, previewFrames.length);
   const total = effectiveDurations.reduce((sum, val) => sum + val, 0) || (previewFrames.length * 1000/VIDEO_PREVIEW_FPS);
   const derivedFPS = total > 0 ? (previewFrames.length / (total/1000)) : (fps || VIDEO_PREVIEW_FPS);
@@ -2204,7 +2303,8 @@ function buildAnimationPreviewData(frames, options, durations, fps){
     bg: options.bg,
     fg: options.fg,
     glow: options.glow,
-    fps: derivedFPS
+    fps: derivedFPS,
+    disposables
   };
 }
 
@@ -2628,7 +2728,11 @@ function drawAnimationFrame(player, index){
     glow: player.data.glow
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
-  scheduleAdvancedDitherPreview(player.canvas);
+  if(frameData.type === 'advanced-base'){
+    scheduleAdvancedDitherPreview(player.canvas);
+  }else{
+    clearAdvancedDitherPreview(player.canvas);
+  }
 }
 
 function renderPreview(previewData, scale){
@@ -2675,11 +2779,17 @@ function renderPreview(previewData, scale){
 
 let glowHelperCanvas = null;
 let glowHelperCtx = null;
+let imageFrameCanvas = null;
+let imageFrameCtx = null;
 
 function paintFrame(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   const type = data.type || data.kind || (data.mask ? 'mask' : 'ascii');
-  if(type === 'ascii'){
+  if(type === 'bitmap'){
+    paintBitmapFrame(ctx, data, outWidth, outHeight);
+  }else if(type === 'image-data'){
+    paintImageDataFrame(ctx, data, outWidth, outHeight);
+  }else if(type === 'ascii'){
     paintAscii(ctx, data, outWidth, outHeight);
   }else if(type === 'thermal'){
     paintThermal(ctx, data, outWidth, outHeight);
@@ -2688,6 +2798,41 @@ function paintFrame(ctx, data, outWidth, outHeight){
   }else{
     paintMask(ctx, data, outWidth, outHeight);
   }
+}
+
+function paintBitmapFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const source = data.bitmap || data.image || data.canvas;
+  if(source){
+    ctx.drawImage(source, 0, 0, outWidth, outHeight);
+  }
+  ctx.restore();
+}
+
+function paintImageDataFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data || !data.imageData) return;
+  const imageData = data.imageData;
+  const width = imageData.width;
+  const height = imageData.height;
+  if(!width || !height) return;
+  if(!imageFrameCanvas || imageFrameCanvas.width !== width || imageFrameCanvas.height !== height){
+    imageFrameCanvas = document.createElement('canvas');
+    imageFrameCanvas.width = width;
+    imageFrameCanvas.height = height;
+    imageFrameCtx = imageFrameCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if(!imageFrameCtx) return;
+  imageFrameCtx.putImageData(imageData, 0, 0);
+  paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
 }
 
 function paintMask(ctx, data, outWidth, outHeight){
