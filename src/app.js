@@ -1677,6 +1677,17 @@ function drawBitmapToCanvas(imageBitmap, width, height){
 
 async function waitForVideo(video, event){
   return new Promise((resolve, reject) => {
+    const readyState = typeof video.readyState === 'number' ? video.readyState : 0;
+    const thresholds = {
+      loadedmetadata: 1,
+      loadeddata: 2,
+      canplay: 3,
+      canplaythrough: 4
+    };
+    if(event in thresholds && readyState >= thresholds[event]){
+      resolve();
+      return;
+    }
     const cleanup = () => {
       video.removeEventListener(event, onSuccess);
       video.removeEventListener('error', onError);
