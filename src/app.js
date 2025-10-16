@@ -2052,6 +2052,13 @@ async function decodeVideoElementFrames(file){
   let success = false;
   try{
     await waitForVideo(video, 'loadedmetadata');
+    if(video.readyState < 2){
+      try{
+        await waitForVideo(video, 'loadeddata');
+      }catch(err){
+        console.warn('[video] loadeddata wait failed', err);
+      }
+    }
     const width = video.videoWidth || 1;
     const height = video.videoHeight || 1;
     const exportDims = scaleDimensions(width, height, MAX_UPLOAD_DIMENSION);
@@ -2152,7 +2159,8 @@ async function waitForVideo(video, event){
 
 async function seekVideo(video, time){
   return new Promise((resolve, reject) => {
-    const onSeeked = () => {
+    let resolveEvent = 'seeked';
+    const onResolve = () => {
       cleanup();
       resolve();
     };
@@ -2161,17 +2169,30 @@ async function seekVideo(video, time){
       reject(new Error('Errore durante la lettura del video'));
     };
     const cleanup = () => {
-      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener(resolveEvent, onResolve);
       video.removeEventListener('error', onError);
     };
-    video.addEventListener('seeked', onSeeked, {once:true});
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const maxTime = duration > 0 ? Math.max(0, duration - 0.0005) : time;
+    const clampedTime = Math.min(maxTime, Math.max(0, time));
+    const current = video.currentTime || 0;
+    const delta = Math.abs(current - clampedTime);
+    if(delta <= 0.0005){
+      if(video.readyState >= 2){
+        resolve();
+        return;
+      }
+      resolveEvent = 'loadeddata';
+    }
+    video.addEventListener(resolveEvent, onResolve, {once:true});
     video.addEventListener('error', onError, {once:true});
-    try{
-      const maxTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.max(0, video.duration - 0.0005) : time;
-      video.currentTime = Math.min(maxTime, Math.max(0, time));
-    }catch(err){
-      cleanup();
-      reject(err);
+    if(resolveEvent === 'seeked'){
+      try{
+        video.currentTime = clampedTime;
+      }catch(err){
+        cleanup();
+        reject(err);
+      }
     }
   });
 }
@@ -2825,26 +2846,6 @@ function createFrameData(result, options){
       gradient
     };
   }
-  if(kind === 'advanced-base'){
-    const tonal = ensureUint8Array(result.tonal);
-    const colors = ensureUint8Array(result.colors);
-    return {
-      kind: 'advanced-base',
-      gridWidth: result.gridWidth,
-      gridHeight: result.gridHeight,
-      tile,
-      tonal,
-      colors,
-      threshold: result.threshold != null ? result.threshold : options.thr,
-      invert: !!result.invert,
-      outputWidth: adjusted.width,
-      outputHeight: adjusted.height,
-      aspectWidth,
-      aspectHeight,
-      aspectRatio: adjusted.ratio,
-      mode: result.mode || options.mode || 'advanced-base'
-    };
-  }
   return {
     kind: 'mask',
     gridWidth: result.gridWidth,
@@ -2921,24 +2922,6 @@ function buildPreviewData(frame, options){
       fg: options.fg,
       glow: options.glow,
       gradient
-    };
-  }
-  if(frame.kind === 'advanced-base'){
-    return {
-      type: 'advanced-base',
-      mode: frame.mode,
-      width: frame.outputWidth,
-      height: frame.outputHeight,
-      gridWidth: frame.gridWidth,
-      gridHeight: frame.gridHeight,
-      tile: frame.tile,
-      tonal: frame.tonal,
-      colors: frame.colors,
-      threshold: frame.threshold,
-      invert: frame.invert,
-      bg: options.bg,
-      fg: options.fg,
-      glow: options.glow
     };
   }
   return {
@@ -3753,41 +3736,6 @@ function paintFrame(ctx, data, outWidth, outHeight){
   if(gradientKey && gradientKey !== 'none' && type !== 'advanced-base'){
     applyGradientOverlay(ctx, gradientKey, outWidth, outHeight);
   }
-}
-
-function paintBitmapFrame(ctx, data, outWidth, outHeight){
-  if(!ctx || !data) return;
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  const bg = data.bg;
-  if(bg && bg !== 'transparent'){
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, outWidth, outHeight);
-  }else{
-    ctx.clearRect(0, 0, outWidth, outHeight);
-  }
-  const source = data.bitmap || data.image || data.canvas;
-  if(source){
-    ctx.drawImage(source, 0, 0, outWidth, outHeight);
-  }
-  ctx.restore();
-}
-
-function paintImageDataFrame(ctx, data, outWidth, outHeight){
-  if(!ctx || !data || !data.imageData) return;
-  const imageData = data.imageData;
-  const width = imageData.width;
-  const height = imageData.height;
-  if(!width || !height) return;
-  if(!imageFrameCanvas || imageFrameCanvas.width !== width || imageFrameCanvas.height !== height){
-    imageFrameCanvas = document.createElement('canvas');
-    imageFrameCanvas.width = width;
-    imageFrameCanvas.height = height;
-    imageFrameCtx = imageFrameCanvas.getContext('2d', { willReadFrequently: true });
-  }
-  if(!imageFrameCtx) return;
-  imageFrameCtx.putImageData(imageData, 0, 0);
-  paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
 }
 
 function paintBitmapFrame(ctx, data, outWidth, outHeight){
