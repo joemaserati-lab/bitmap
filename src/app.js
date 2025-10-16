@@ -318,6 +318,9 @@ const state = {
   customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM),
   asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD),
   advancedDitherSettings: {},
+  cpuOnlyDitherOptions: null,
+  ditherOptionOrder: null,
+  pendingCpuOnlySelection: '',
   advancedDitherControls: new Map(),
   advancedDitherActiveCanvas: null,
   advancedDitherPreviewTokens: new WeakMap(),
@@ -505,6 +508,9 @@ function bindControls(){
     if(!el) continue;
     el.addEventListener('change', () => {
       if(id === 'dither'){
+        if(!CPU_ONLY_ADVANCED_DITHERS.has(el.value)){
+          state.pendingCpuOnlySelection = '';
+        }
         updateAsciiCustomVisibility();
         updateAdvancedDitherVisibility();
       }
@@ -526,6 +532,8 @@ function bindControls(){
       updateExportButtons();
     });
   }
+
+  cacheCpuOnlyDitherOptions();
 }
 
 function updateAsciiCustomVisibility(){
@@ -577,6 +585,97 @@ function syncASCIIWordInput(){
   state.asciiWordString = normalized;
   if(controls.asciiWord.value !== normalized){
     controls.asciiWord.value = normalized;
+  }
+}
+
+function cacheCpuOnlyDitherOptions(){
+  const select = controls.dither;
+  if(!select) return;
+  if(state.cpuOnlyDitherOptions && state.ditherOptionOrder){
+    return;
+  }
+  const options = Array.from(select.options);
+  const order = new Map();
+  options.forEach((opt, index) => {
+    order.set(opt.value, index);
+  });
+  state.ditherOptionOrder = order;
+  const cpuOptions = options
+    .filter((opt) => CPU_ONLY_ADVANCED_DITHERS.has(opt.value))
+    .map((opt) => ({ value: opt.value, option: opt }));
+  cpuOptions.sort((a, b) => {
+    const ai = order.get(a.value) ?? 0;
+    const bi = order.get(b.value) ?? 0;
+    return ai - bi;
+  });
+  state.cpuOnlyDitherOptions = cpuOptions;
+}
+
+function applyCpuOnlyDitherAvailability(){
+  const select = controls.dither;
+  if(!select) return;
+  cacheCpuOnlyDitherOptions();
+  const entries = state.cpuOnlyDitherOptions;
+  const order = state.ditherOptionOrder;
+  if(!entries || !entries.length){
+    updateAdvancedDitherVisibility();
+    return;
+  }
+  const isVideo = state.sourceKind === 'video';
+  let selectionChanged = false;
+  if(isVideo){
+    for(const entry of entries){
+      if(select.contains(entry.option)){
+        if(select.value === entry.value){
+          state.pendingCpuOnlySelection = entry.value;
+          selectionChanged = true;
+        }
+        entry.option.remove();
+      }
+    }
+    if(selectionChanged){
+      const fallbackOption = select.querySelector('option[value="none"]') || select.options[0] || null;
+      if(fallbackOption){
+        select.value = fallbackOption.value;
+      }else{
+        select.value = 'none';
+      }
+    }
+  }else{
+    const sorted = entries.slice().sort((a, b) => {
+      const ai = order && order.has(a.value) ? order.get(a.value) : 0;
+      const bi = order && order.has(b.value) ? order.get(b.value) : 0;
+      return ai - bi;
+    });
+    for(const entry of sorted){
+      if(select.contains(entry.option)) continue;
+      const targetOrder = order ? order.get(entry.value) : null;
+      let inserted = false;
+      if(targetOrder != null){
+        const current = Array.from(select.options);
+        for(const opt of current){
+          const optOrder = order ? order.get(opt.value) : null;
+          if(optOrder != null && optOrder > targetOrder){
+            select.insertBefore(entry.option, opt);
+            inserted = true;
+            break;
+          }
+        }
+      }
+      if(!inserted){
+        select.appendChild(entry.option);
+      }
+    }
+    if(state.pendingCpuOnlySelection && CPU_ONLY_ADVANCED_DITHERS.has(state.pendingCpuOnlySelection)){
+      select.value = state.pendingCpuOnlySelection;
+      selectionChanged = true;
+    }
+    state.pendingCpuOnlySelection = '';
+  }
+  updateAsciiCustomVisibility();
+  updateAdvancedDitherVisibility();
+  if(selectionChanged){
+    fastRender(true);
   }
 }
 
@@ -1782,6 +1881,7 @@ function setSourceCanvas(canvas, name){
   state.pendingSourceKey = '';
   updateExportButtons();
   refreshExportDimensionUI();
+  applyCpuOnlyDitherAvailability();
 }
 
 function setSourceVideo(videoData, name){
@@ -1810,6 +1910,7 @@ function setSourceVideo(videoData, name){
   state.pendingSourceKey = '';
   updateExportButtons();
   refreshExportDimensionUI();
+  applyCpuOnlyDitherAvailability();
 }
 
 async function ensureWorkerReady(){
