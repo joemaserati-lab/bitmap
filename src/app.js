@@ -1,5 +1,6 @@
 import { applyToCanvas } from './postfx.js';
 import { ensureEffect } from './effects/index.js';
+import { computeExportBaseSize } from './exportSizing.mjs';
 
 const $ = (id) => document.getElementById(id);
 
@@ -48,6 +49,141 @@ const ASCII_CHARSETS = {
   ascii_unicode: [' ','·',':','-','=','+','*','#','%','@'],
   ascii_word: [' ','P','I','X','E','L']
 };
+
+const ADVANCED_DITHER_DEFS = [
+  {
+    id: 'blueNoise',
+    label: 'Blue Noise',
+    hotkey: 'b',
+    defaults: { scale: 1, contrast: 1, bias: 0 },
+    params: [
+      { key: 'scale', type: 'range', min: 0.25, max: 4, step: 0.25, label: 'Scala' },
+      { key: 'contrast', type: 'range', min: 0.2, max: 3, step: 0.1, label: 'Contrasto' },
+      { key: 'bias', type: 'number', min: -128, max: 128, step: 1, label: 'Bias' }
+    ]
+  },
+  {
+    id: 'clusteredDot',
+    label: 'Clustered Dot',
+    hotkey: 'c',
+    defaults: { size: 8, angle: 45, gain: 1 },
+    params: [
+      { key: 'size', type: 'select', options: [{ value: 4, label: '4×4' }, { value: 8, label: '8×8' }], label: 'Dimensione' },
+      { key: 'angle', type: 'number', min: 0, max: 180, step: 1, label: 'Angolo' },
+      { key: 'gain', type: 'range', min: 0.5, max: 2.5, step: 0.1, label: 'Gain' }
+    ]
+  },
+  {
+    id: 'dotDiffusion',
+    label: 'Dot Diffusion',
+    defaults: { classMask: 'knuth', strength: 1 },
+    params: [
+      { key: 'classMask', type: 'select', options: [{ value: 'knuth', label: 'Knuth' }, { value: 'ulichney', label: 'Ulichney' }], label: 'Maschera' },
+      { key: 'strength', type: 'range', min: 0.2, max: 2, step: 0.1, label: 'Forza' }
+    ]
+  },
+  {
+    id: 'edKernels',
+    label: 'Error Diffusion+',
+    defaults: { kernel: 'sierraLite', serpentine: true, clip: true, gain: 1 },
+    params: [
+      { key: 'kernel', type: 'select', options: [
+        { value: 'sierraLite', label: 'Sierra Lite' },
+        { value: 'twoRowSierra', label: 'Two-Row Sierra' },
+        { value: 'stevensonArce', label: 'Stevenson-Arce' },
+        { value: 'shiauFan', label: 'Shiau-Fan' }
+      ], label: 'Kernel' },
+      { key: 'serpentine', type: 'checkbox', label: 'Serpentine' },
+      { key: 'clip', type: 'checkbox', label: 'Clipping' },
+      { key: 'gain', type: 'range', min: 0.2, max: 2, step: 0.1, label: 'Gain' }
+    ]
+  },
+  {
+    id: 'paletteDither',
+    label: 'Palette Dither',
+    hotkey: 'p',
+    defaults: { palette: [[0, 0, 0], [255, 255, 255]], diffusion: true, strength: 1 },
+    params: [
+      { key: 'palette', type: 'text', label: 'Palette (hex)', placeholder: '#000000,#ffffff' },
+      { key: 'diffusion', type: 'checkbox', label: 'Diffusione errore' },
+      { key: 'strength', type: 'range', min: 0, max: 1, step: 0.05, label: 'Forza' }
+    ]
+  },
+  {
+    id: 'autoQuant',
+    label: 'Auto Quant',
+    defaults: { colors: 8, diffusion: false },
+    params: [
+      { key: 'colors', type: 'number', min: 2, max: 32, step: 1, label: 'Colori' },
+      { key: 'diffusion', type: 'checkbox', label: 'Diffusione' }
+    ]
+  },
+  {
+    id: 'cmykHalftone',
+    label: 'CMYK Halftone',
+    hotkey: 'h',
+    defaults: { dotScale: 1, ucr: 0.2 },
+    params: [
+      { key: 'dotScale', type: 'range', min: 0.5, max: 3, step: 0.1, label: 'Scala punto' },
+      { key: 'ucr', type: 'range', min: 0, max: 1, step: 0.05, label: 'UCR' }
+    ]
+  },
+  {
+    id: 'halftoneShapes',
+    label: 'Halftone Shapes',
+    defaults: { shape: 'circle', angle: 45, minSize: 0.1, maxSize: 0.6, jitter: 0.1, seed: 1337 },
+    params: [
+      { key: 'shape', type: 'select', options: [
+        { value: 'circle', label: 'Cerchio' },
+        { value: 'square', label: 'Quadrato' },
+        { value: 'diamond', label: 'Diamante' },
+        { value: 'triangle', label: 'Triangolo' },
+        { value: 'hex', label: 'Esagono' }
+      ], label: 'Forma' },
+      { key: 'angle', type: 'number', min: 0, max: 180, step: 1, label: 'Angolo' },
+      { key: 'minSize', type: 'number', min: 0.05, max: 1, step: 0.05, label: 'Min' },
+      { key: 'maxSize', type: 'number', min: 0.1, max: 1.5, step: 0.05, label: 'Max' },
+      { key: 'jitter', type: 'range', min: 0, max: 0.5, step: 0.05, label: 'Jitter' },
+      { key: 'seed', type: 'number', min: 0, max: 9999, step: 1, label: 'Seed' }
+    ]
+  },
+  {
+    id: 'lineDither',
+    label: 'Line Dither',
+    hotkey: 'l',
+    defaults: { cell: 8, angle: 0, thickness: 0.5, aa: true },
+    params: [
+      { key: 'cell', type: 'number', min: 2, max: 64, step: 1, label: 'Cella' },
+      { key: 'angle', type: 'number', min: 0, max: 180, step: 1, label: 'Angolo' },
+      { key: 'thickness', type: 'range', min: 0.1, max: 1, step: 0.05, label: 'Spessore' },
+      { key: 'aa', type: 'checkbox', label: 'Antialias' }
+    ]
+  },
+  {
+    id: 'hatching',
+    label: 'Hatching',
+    hotkey: 'x',
+    defaults: { levels: 5, angles: [0, 45, 90, 135], densityCurve: 'linear' },
+    params: [
+      { key: 'levels', type: 'number', min: 1, max: 8, step: 1, label: 'Livelli' },
+      { key: 'angles', type: 'text', label: 'Angoli (°)', placeholder: '0,45,90,135' },
+      { key: 'densityCurve', type: 'select', options: [
+        { value: 'linear', label: 'Lineare' },
+        { value: 'ease', label: 'Ease' }
+      ], label: 'Curva densità' }
+    ]
+  },
+  {
+    id: 'stippling',
+    label: 'Stippling',
+    defaults: { minR: 1, maxR: 3, density: 1 },
+    params: [
+      { key: 'minR', type: 'number', min: 0.5, max: 6, step: 0.1, label: 'Raggio minimo' },
+      { key: 'maxR', type: 'number', min: 1, max: 8, step: 0.1, label: 'Raggio massimo' },
+      { key: 'density', type: 'number', min: 0.1, max: 4, step: 0.1, label: 'Densità' }
+    ]
+  }
+];
 
 function clamp01(value){
   const num = Number(value);
@@ -173,8 +309,28 @@ const state = {
   videoSource: null,
   previewPlayer: null,
   customASCIIString: normalizeCustomASCIIString(DEFAULT_ASCII_CUSTOM),
-  asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD)
+  asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD),
+  advancedDitherSettings: {},
+  advancedDitherControls: new Map(),
+  advancedDitherActiveCanvas: null,
+  advancedDitherPreviewTokens: new WeakMap(),
+  advancedDitherJobCounter: 0,
+  previewDisposables: []
 };
+
+function disposePreviewAssets(){
+  const disposables = state.previewDisposables || [];
+  if(disposables.length){
+    for(const dispose of disposables){
+      try{
+        dispose();
+      }catch(err){
+        console.warn('[preview] cleanup failed', err);
+      }
+    }
+  }
+  state.previewDisposables = [];
+}
 
 let renderQueued = false;
 let renderTimer = null;
@@ -190,6 +346,7 @@ function init(){
   bindDropzone();
   bindExportModal();
   bindPlaybackControl();
+  initAdvancedDitherControls();
   if(controls.asciiChars){
     controls.asciiChars.value = state.customASCIIString;
   }
@@ -311,6 +468,7 @@ function bindControls(){
     el.addEventListener('change', () => {
       if(id === 'dither'){
         updateAsciiCustomVisibility();
+        updateAdvancedDitherVisibility();
       }
       fastRender();
     });
@@ -392,29 +550,14 @@ function getExportScalePreset(){
 }
 
 function getExportBaseSize(){
-  if(state.lastResult){
-    if(state.lastResult.type === 'image' && state.lastResult.frame){
-      const frame = state.lastResult.frame;
-      return {
-        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
-        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
-      };
-    }
-    if(state.lastResult.type === 'video' && state.lastResult.frames && state.lastResult.frames.length){
-      const frame = state.lastResult.frames[0];
-      return {
-        width: frame.outputWidth || state.sourceWidth || state.lastSize.width || 0,
-        height: frame.outputHeight || state.sourceHeight || state.lastSize.height || 0
-      };
-    }
-  }
-  if(state.sourceWidth && state.sourceHeight){
-    return {width: state.sourceWidth, height: state.sourceHeight};
-  }
-  if(state.lastSize.width && state.lastSize.height){
-    return {width: state.lastSize.width, height: state.lastSize.height};
-  }
-  return {width: 1024, height: 1024};
+  return computeExportBaseSize({
+    sourceKind: state.sourceKind,
+    videoSource: state.videoSource,
+    lastResult: state.lastResult,
+    sourceWidth: state.sourceWidth,
+    sourceHeight: state.sourceHeight,
+    lastSize: state.lastSize
+  });
 }
 
 function updateExportDimensionPlaceholders(){
@@ -711,6 +854,337 @@ function bindPlaybackControl(){
       updatePlaybackButton(true, false);
     }
   });
+}
+
+function initAdvancedDitherControls(){
+  const panel = $('ditherAdvancedPanel');
+  const container = $('ditherAdvancedControls');
+  if(!panel || !container){
+    return;
+  }
+  container.innerHTML = '';
+  state.advancedDitherSettings = {};
+  state.advancedDitherControls = new Map();
+  for(const def of ADVANCED_DITHER_DEFS){
+    const defaults = cloneAdvancedDefaults(def.defaults || {});
+    state.advancedDitherSettings[def.id] = { params: defaults };
+    const group = document.createElement('div');
+    group.className = 'dither-advanced__group';
+    group.hidden = true;
+    const paramRefs = new Map();
+    for(const param of def.params || []){
+      const field = document.createElement('div');
+      field.className = 'field';
+      const label = document.createElement('label');
+      label.textContent = param.label || param.key;
+      field.appendChild(label);
+      const { input, display } = createAdvancedDitherInput(def, param, defaults[param.key]);
+      if(param.placeholder){
+        input.placeholder = param.placeholder;
+      }
+      field.appendChild(input);
+      if(display){
+        field.appendChild(display);
+      }
+      group.appendChild(field);
+      paramRefs.set(param.key, { input, display, definition: param });
+    }
+    container.appendChild(group);
+    state.advancedDitherControls.set(def.id, { root: group, params: paramRefs });
+  }
+  updateAdvancedDitherVisibility();
+}
+
+function createAdvancedDitherInput(def, param, initialValue){
+  let value = initialValue;
+  if(value === undefined){
+    value = param.type === 'checkbox' ? false : '';
+  }
+  let input;
+  let display = null;
+  if(param.type === 'select'){
+    input = document.createElement('select');
+    for(const option of param.options || []){
+      const opt = document.createElement('option');
+      opt.value = String(option.value);
+      opt.textContent = option.label;
+      input.appendChild(opt);
+    }
+    const fallback = param.options && param.options.length ? param.options[0].value : '';
+    input.value = String(value != null ? value : fallback);
+  }else if(param.type === 'checkbox'){
+    input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = Boolean(value);
+  }else if(param.type === 'range'){
+    input = document.createElement('input');
+    input.type = 'range';
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    const numValue = Number.isFinite(Number(value)) ? Number(value) : Number(param.min || 0);
+    input.value = String(numValue);
+    display = document.createElement('span');
+    display.className = 'range-display';
+    display.textContent = formatAdvancedDisplayValue(param, numValue);
+  }else{
+    input = document.createElement('input');
+    input.type = param.type === 'number' ? 'number' : 'text';
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    let initial = value;
+    if(param.key === 'palette' && Array.isArray(value)){
+      initial = stringifyPalette(value);
+    }else if(param.key === 'angles' && Array.isArray(value)){
+      initial = value.join(',');
+    }
+    input.value = initial != null ? String(initial) : '';
+  }
+  const eventType = param.type === 'checkbox' || param.type === 'select' ? 'change' : 'input';
+  input.addEventListener(eventType, () => handleAdvancedDitherParamChange(def, param, input, display));
+  return { input, display };
+}
+
+function handleAdvancedDitherParamChange(def, param, input, display){
+  const settings = state.advancedDitherSettings[def.id];
+  if(!settings) return;
+  let value;
+  if(param.type === 'checkbox'){
+    value = Boolean(input.checked);
+  }else if(param.type === 'select'){
+    const selected = input.value;
+    const numeric = Number(selected);
+    value = Number.isNaN(numeric) ? selected : numeric;
+  }else if(param.key === 'palette'){
+    value = parsePaletteValue(input.value, def.defaults && def.defaults.palette);
+    input.value = stringifyPalette(value);
+  }else if(param.key === 'angles'){
+    value = parseAnglesValue(input.value, def.defaults && def.defaults.angles);
+    input.value = value.join(',');
+  }else if(param.type === 'range' || param.type === 'number'){
+    const num = Number(input.value);
+    const fallback = Number(param.min || 0);
+    value = Number.isFinite(num) ? num : fallback;
+    input.value = String(value);
+  }else{
+    value = input.value;
+  }
+  settings.params[param.key] = value;
+  if(display){
+    const numeric = Number(value);
+    display.textContent = formatAdvancedDisplayValue(param, Number.isFinite(numeric) ? numeric : Number(input.value));
+  }
+  fastRender(true);
+}
+
+function formatAdvancedDisplayValue(param, value){
+  if(typeof value !== 'number' || Number.isNaN(value)){
+    return '';
+  }
+  const step = typeof param.step === 'number' ? param.step : 0.1;
+  const decimals = step < 1 ? Math.max(0, Math.ceil(Math.abs(Math.log10(step)))) : 0;
+  return value.toFixed(decimals);
+}
+
+function cloneAdvancedDefaults(defaults){
+  if(!defaults) return {};
+  return JSON.parse(JSON.stringify(defaults));
+}
+
+function updateAdvancedDitherVisibility(){
+  const panel = $('ditherAdvancedPanel');
+  const mode = controls.dither ? controls.dither.value : 'none';
+  const def = getAdvancedDitherDefinition(mode);
+  if(!panel){
+    return;
+  }
+  panel.hidden = !def;
+  for(const [id, refs] of state.advancedDitherControls){
+    refs.root.hidden = !def || def.id !== id;
+  }
+  if(def){
+    syncAdvancedDitherControls(def.id);
+  }
+}
+
+function syncAdvancedDitherControls(id){
+  const refs = state.advancedDitherControls.get(id);
+  const settings = state.advancedDitherSettings[id];
+  if(!refs || !settings) return;
+  for(const [key, ref] of refs.params){
+    const paramDef = ref.definition;
+    const value = settings.params[key];
+    if(paramDef.type === 'checkbox'){
+      ref.input.checked = Boolean(value);
+    }else if(paramDef.type === 'select'){
+      ref.input.value = String(value);
+    }else if(paramDef.key === 'palette'){
+      ref.input.value = stringifyPalette(value);
+    }else if(paramDef.key === 'angles'){
+      ref.input.value = Array.isArray(value) ? value.join(',') : '';
+    }else{
+      ref.input.value = value != null ? String(value) : '';
+    }
+    if(ref.display){
+      const numeric = Number(ref.input.value);
+      ref.display.textContent = formatAdvancedDisplayValue(paramDef, Number.isFinite(numeric) ? numeric : 0);
+    }
+  }
+}
+
+function getAdvancedDitherDefinition(id){
+  return ADVANCED_DITHER_DEFS.find((def) => def.id === id);
+}
+
+function prepareAdvancedDitherParams(def, params){
+  const output = {};
+  for(const param of def.params || []){
+    const value = params[param.key];
+    if(param.type === 'checkbox'){
+      output[param.key] = Boolean(value);
+    }else if(param.key === 'palette'){
+      output[param.key] = parsePaletteValue(value, def.defaults && def.defaults.palette);
+    }else if(param.key === 'angles'){
+      output[param.key] = parseAnglesValue(value, def.defaults && def.defaults.angles);
+    }else if(param.type === 'range' || param.type === 'number'){
+      const num = Number(value);
+      output[param.key] = Number.isFinite(num) ? num : Number(param.min || 0);
+    }else if(param.type === 'select'){
+      if(typeof value === 'string'){
+        const numeric = Number(value);
+        output[param.key] = Number.isNaN(numeric) ? value : numeric;
+      }else{
+        output[param.key] = value;
+      }
+    }else{
+      output[param.key] = value;
+    }
+  }
+  return output;
+}
+
+function buildAdvancedDitherChain(){
+  const mode = controls.dither ? controls.dither.value : 'none';
+  const def = getAdvancedDitherDefinition(mode);
+  if(!def) return [];
+  const settings = state.advancedDitherSettings[def.id];
+  if(!settings) return [];
+  const params = prepareAdvancedDitherParams(def, settings.params);
+  const base = collectRenderOptions();
+  const globals = {
+    pixelSize: base.px,
+    threshold: base.thr,
+    blur: base.blurPx,
+    grain: base.grain,
+    blackPoint: base.bp,
+    whitePoint: base.wp,
+    gamma: base.gam,
+    brightness: base.bri,
+    contrast: base.con,
+    invertMode: base.invertMode,
+    background: base.bg,
+    foreground: base.fg
+  };
+  return [{ name: def.id, params: { ...params, _globals: globals } }];
+}
+
+async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null } = {}){
+  if(!canvas) return;
+  const chain = effects && effects.length ? effects : buildAdvancedDitherChain();
+  if(!chain.length) return;
+  try{
+    const shouldAbort = token == null
+      ? undefined
+      : () => state.advancedDitherPreviewTokens.get(canvas) !== token;
+    await applyToCanvas(canvas, chain, {
+      preview,
+      maxDimension: preview ? 1024 : undefined,
+      shouldAbort
+    });
+  }catch(err){
+    console.warn('[dither] applicazione avanzata fallita', err);
+  }
+}
+
+function scheduleAdvancedDitherPreview(canvas){
+  state.advancedDitherActiveCanvas = canvas || null;
+  const effects = buildAdvancedDitherChain();
+  if(!effects.length || !canvas){
+    if(canvas){
+      state.advancedDitherPreviewTokens.delete(canvas);
+    }
+    return;
+  }
+  const token = ++state.advancedDitherJobCounter;
+  state.advancedDitherPreviewTokens.set(canvas, token);
+  requestAnimationFrame(() => {
+    if(state.advancedDitherActiveCanvas !== canvas) return;
+    if(state.advancedDitherPreviewTokens.get(canvas) !== token) return;
+    applyAdvancedDitherToCanvas(canvas, { preview: true, token });
+  });
+}
+
+function clearAdvancedDitherPreview(canvas){
+  if(!canvas) return;
+  state.advancedDitherPreviewTokens.delete(canvas);
+  if(state.advancedDitherActiveCanvas === canvas){
+    state.advancedDitherActiveCanvas = null;
+  }
+}
+
+function isAdvancedDitherMode(mode){
+  return Boolean(getAdvancedDitherDefinition(mode));
+}
+
+function parsePaletteValue(value, fallback){
+  if(Array.isArray(value)){
+    return value;
+  }
+  if(typeof value !== 'string'){
+    return Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]];
+  }
+  const parts = value.split(/[;,\s]+/).map((part) => part.trim()).filter(Boolean);
+  if(!parts.length){
+    return Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]];
+  }
+  const palette = [];
+  for(const part of parts){
+    const hex = part.replace('#','');
+    if(hex.length === 6){
+      const r = parseInt(hex.slice(0,2), 16);
+      const g = parseInt(hex.slice(2,4), 16);
+      const b = parseInt(hex.slice(4,6), 16);
+      if(Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)){
+        palette.push([r, g, b]);
+      }
+    }
+  }
+  return palette.length ? palette : (Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]]);
+}
+
+function stringifyPalette(palette){
+  if(!Array.isArray(palette)) return '';
+  return palette.map((color) => {
+    if(!Array.isArray(color) || color.length < 3) return '#000000';
+    const [r, g, b] = color;
+    const toHex = (val) => {
+      const clamped = Math.max(0, Math.min(255, Math.round(val || 0)));
+      return clamped.toString(16).padStart(2, '0');
+    };
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }).join(',');
+}
+
+function parseAnglesValue(value, fallback){
+  if(Array.isArray(value)){
+    return value;
+  }
+  if(typeof value !== 'string'){
+    return Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135];
+  }
+  const parts = value.split(/[;,]+/).map((part) => Number(part.trim())).filter((num) => Number.isFinite(num));
+  return parts.length ? parts : (Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135]);
 }
 
 function beginUpload(name=''){
@@ -1052,6 +1526,7 @@ function captureVideoFrame(video, width, height){
 
 function setSourceCanvas(canvas, name){
   stopPreviewAnimation();
+  disposePreviewAssets();
   state.sourceKind = 'image';
   state.videoSource = null;
   state.sourceCanvas = canvas;
@@ -1093,6 +1568,7 @@ function setSourceCanvas(canvas, name){
 function setSourceVideo(videoData, name){
   if(!videoData) return;
   stopPreviewAnimation();
+  disposePreviewAssets();
   state.sourceKind = 'video';
   state.videoSource = videoData;
   state.sourceCanvas = null;
@@ -1290,6 +1766,7 @@ function collectRenderOptions(){
 }
 
 function buildWorkerOptions(options){
+  const advanced = isAdvancedDitherMode(options.mode);
   return {
     pixelSize: options.px,
     threshold: options.thr,
@@ -1302,10 +1779,12 @@ function buildWorkerOptions(options){
     contrast: options.con,
     style: options.style,
     thickness: options.thick,
-    dither: options.mode,
+    dither: advanced ? 'advanced_base' : options.mode,
     invertMode: options.invertMode,
     asciiCustom: options.asciiCustom,
-    asciiWord: options.asciiWord
+    asciiWord: options.asciiWord,
+    mode: options.mode,
+    advanced
   };
 }
 
@@ -1352,7 +1831,9 @@ async function generate(){
   state.lastSVG = '';
   state.lastSVGJob = 0;
   const previewData = buildPreviewData(frameData, options);
+  disposePreviewAssets();
   state.lastPreview = previewData;
+  state.previewDisposables = [];
   const previewWidth = previewData ? previewData.width : 0;
   const previewHeight = previewData ? previewData.height : 0;
   state.lastSize = {width: previewWidth, height: previewHeight};
@@ -1364,10 +1845,13 @@ async function generate(){
 }
 
 async function generateVideoPreview(options){
+  stopPreviewAnimation();
   const video = state.videoSource;
   if(!video || !video.previewFrames || !video.previewFrames.length){
     state.lastResult = null;
     state.lastPreview = null;
+    disposePreviewAssets();
+    state.previewDisposables = [];
     state.lastSVG = '';
     state.lastSVGJob = 0;
     state.lastSize = {width: 0, height: 0};
@@ -1404,8 +1888,10 @@ async function generateVideoPreview(options){
   state.lastResultId = state.currentJobId;
   state.lastSVG = '';
   state.lastSVGJob = 0;
-  const previewData = buildAnimationPreviewData(frames, options, durations, video.previewFPS || VIDEO_PREVIEW_FPS);
+  const previewData = await buildAnimationPreviewData(frames, options, durations, video.previewFPS || VIDEO_PREVIEW_FPS);
+  disposePreviewAssets();
   state.lastPreview = previewData;
+  state.previewDisposables = previewData && previewData.disposables ? previewData.disposables : [];
   const previewWidth = previewData ? previewData.width : 0;
   const previewHeight = previewData ? previewData.height : 0;
   state.lastSize = {width: previewWidth, height: previewHeight};
@@ -1619,6 +2105,26 @@ function createFrameData(result, options){
       mode: result.mode || options.mode || 'thermal'
     };
   }
+  if(kind === 'advanced-base'){
+    const tonal = ensureUint8Array(result.tonal);
+    const colors = ensureUint8Array(result.colors);
+    return {
+      kind: 'advanced-base',
+      gridWidth: result.gridWidth,
+      gridHeight: result.gridHeight,
+      tile,
+      tonal,
+      colors,
+      threshold: result.threshold != null ? result.threshold : options.thr,
+      invert: !!result.invert,
+      outputWidth: adjusted.width,
+      outputHeight: adjusted.height,
+      aspectWidth,
+      aspectHeight,
+      aspectRatio: adjusted.ratio,
+      mode: result.mode || options.mode || 'advanced-base'
+    };
+  }
   return {
     kind: 'mask',
     gridWidth: result.gridWidth,
@@ -1674,6 +2180,24 @@ function buildPreviewData(frame, options){
       glow: options.glow
     };
   }
+  if(frame.kind === 'advanced-base'){
+    return {
+      type: 'advanced-base',
+      mode: frame.mode,
+      width: frame.outputWidth,
+      height: frame.outputHeight,
+      gridWidth: frame.gridWidth,
+      gridHeight: frame.gridHeight,
+      tile: frame.tile,
+      tonal: frame.tonal,
+      colors: frame.colors,
+      threshold: frame.threshold,
+      invert: frame.invert,
+      bg: options.bg,
+      fg: options.fg,
+      glow: options.glow
+    };
+  }
   return {
     type: 'mask',
     mode: frame.mode,
@@ -1689,17 +2213,111 @@ function buildPreviewData(frame, options){
   };
 }
 
-function buildAnimationPreviewData(frames, options, durations, fps){
+async function buildAnimationPreviewData(frames, options, durations, fps){
   if(!frames || !frames.length){
     return null;
   }
   const first = frames[0];
   const width = Math.max(1, Math.round(first.outputWidth));
   const height = Math.max(1, Math.round(first.outputHeight));
-  const previewFrames = frames.map((frame) => ({
-    ...frame,
-    type: frame.kind
-  }));
+  const previewFrames = [];
+  const disposables = [];
+  const hasAdvancedFrames = frames.some((frame) => frame && frame.kind === 'advanced-base');
+  const needsAdvanced = hasAdvancedFrames && buildAdvancedDitherChain().length > 0;
+  let renderCanvas = null;
+  let renderCtx = null;
+  const alpha = !options.bg || options.bg === 'transparent';
+  const advancedChain = buildAdvancedDitherChain();
+  for(const frame of frames){
+    if(needsAdvanced && frame && frame.kind === 'advanced-base' && advancedChain.length){
+      if(!renderCanvas){
+        renderCanvas = createExportCanvas(width, height, {forceDOM: true});
+        renderCtx = renderCanvas.getContext('2d', {alpha});
+      }
+      if(renderCtx){
+        if(typeof renderCtx.resetTransform === 'function'){
+          renderCtx.resetTransform();
+        }else{
+          renderCtx.setTransform(1, 0, 0, 1, 0, 0);
+        }
+        paintFrame(renderCtx, {
+          ...frame,
+          type: frame.kind,
+          bg: options.bg,
+          fg: options.fg,
+          glow: options.glow
+        }, width, height);
+        await applyAdvancedDitherToCanvas(renderCanvas, { preview: true, effects: advancedChain });
+        let bitmap = null;
+        if(typeof renderCanvas.transferToImageBitmap === 'function'){
+          try{
+            bitmap = renderCanvas.transferToImageBitmap();
+          }catch(err){
+            bitmap = null;
+          }
+        }
+        if(!bitmap && typeof createImageBitmap === 'function'){
+          try{
+            bitmap = await createImageBitmap(renderCanvas);
+          }catch(err){
+            bitmap = null;
+          }
+        }
+        if(bitmap){
+          disposables.push(() => {
+            if(bitmap && typeof bitmap.close === 'function'){
+              bitmap.close();
+            }
+          });
+          previewFrames.push({
+            ...frame,
+            kind: 'bitmap',
+            type: 'bitmap',
+            bitmap
+          });
+          continue;
+        }
+        let imageData = null;
+        try{
+          imageData = renderCtx.getImageData(0, 0, width, height);
+        }catch(err){
+          imageData = null;
+        }
+        if(imageData){
+          previewFrames.push({
+            ...frame,
+            kind: 'bitmap',
+            type: 'image-data',
+            imageData
+          });
+          continue;
+        }
+        const cloneCanvas = document.createElement('canvas');
+        cloneCanvas.width = width;
+        cloneCanvas.height = height;
+        const cloneCtx = cloneCanvas.getContext('2d', {alpha});
+        if(cloneCtx){
+          cloneCtx.imageSmoothingEnabled = false;
+          cloneCtx.drawImage(renderCanvas, 0, 0);
+          previewFrames.push({
+            ...frame,
+            kind: 'bitmap',
+            type: 'bitmap',
+            canvas: cloneCanvas
+          });
+          disposables.push(() => {
+            cloneCanvas.width = 0;
+            cloneCanvas.height = 0;
+          });
+          continue;
+        }
+      }
+    }
+    previewFrames.push({
+      ...frame,
+      type: frame ? frame.kind : undefined
+    });
+  }
   const effectiveDurations = durations.slice(0, previewFrames.length);
   const total = effectiveDurations.reduce((sum, val) => sum + val, 0) || (previewFrames.length * 1000/VIDEO_PREVIEW_FPS);
   const derivedFPS = total > 0 ? (previewFrames.length / (total/1000)) : (fps || VIDEO_PREVIEW_FPS);
@@ -1712,7 +2330,8 @@ function buildAnimationPreviewData(frames, options, durations, fps){
     bg: options.bg,
     fg: options.fg,
     glow: options.glow,
-    fps: derivedFPS
+    fps: derivedFPS,
+    disposables
   };
 }
 
@@ -1971,6 +2590,9 @@ function buildExportSVG(result, options){
   if(frame.kind === 'thermal'){
     return buildIndexedSVGString(frame.indexes, frame.gridWidth, frame.gridHeight, tile, frame.palette, options.bg, frame.paletteKey);
   }
+  if(frame.kind === 'advanced-base'){
+    return buildAdvancedBaseSVG(frame, tile, options);
+  }
   return buildMaskSVGString(frame.mask, frame.gridWidth, frame.gridHeight, tile, options.bg, options.fg, {glow: options.glow});
 }
 
@@ -1983,6 +2605,47 @@ function buildMaskPathData(mask, width, height, tile){
     path += `M${formatNumber(rectX)} ${formatNumber(rectY)}h${formatNumber(rectWidth)}v${formatNumber(tile)}h-${formatNumber(rectWidth)}z`;
   });
   return path;
+}
+
+function buildAdvancedBaseSVG(frame, tile, options){
+  const width = Math.max(1, frame.gridWidth || 0);
+  const height = Math.max(1, frame.gridHeight || 0);
+  const unit = tile || 1;
+  const svgW = Math.max(1, Math.round(width * unit));
+  const svgH = Math.max(1, Math.round(height * unit));
+  const tonal = frame.tonal ? ensureUint8Array(frame.tonal) : null;
+  const colors = frame.colors ? ensureUint8Array(frame.colors) : null;
+  const hasColors = colors && colors.length >= width * height * 3;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+  const bg = options.bg;
+  if(bg && bg !== 'transparent'){
+    svg += `<rect width="100%" height="100%" fill="${escapeXML(bg)}"/>`;
+  }
+  const stepX = unit;
+  const stepY = unit;
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      const idx = y * width + x;
+      let fill = '';
+      if(hasColors){
+        const base = idx * 3;
+        const r = colors[base];
+        const g = colors[base + 1];
+        const b = colors[base + 2];
+        fill = `rgb(${r},${g},${b})`;
+      }else if(tonal && tonal.length > idx){
+        const tone = tonal[idx];
+        fill = `rgb(${tone},${tone},${tone})`;
+      }else{
+        continue;
+      }
+      const rectX = x * stepX;
+      const rectY = y * stepY;
+      svg += `<rect x="${formatNumber(rectX)}" y="${formatNumber(rectY)}" width="${formatNumber(stepX)}" height="${formatNumber(stepY)}" fill="${fill}"/>`;
+    }
+  }
+  svg += '</svg>';
+  return svg;
 }
 
 function formatNumber(value){
@@ -2009,6 +2672,9 @@ function stopPreviewAnimation(){
   const player = state.previewPlayer;
   if(player && player.rafId){
     cancelAnimationFrame(player.rafId);
+  }
+  if(player && player.canvas){
+    clearAdvancedDitherPreview(player.canvas);
   }
   state.previewPlayer = null;
   updatePlaybackButton(false);
@@ -2092,6 +2758,11 @@ function drawAnimationFrame(player, index){
     glow: player.data.glow
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
+  if(frameData.type === 'advanced-base'){
+    scheduleAdvancedDitherPreview(player.canvas);
+  }else{
+    clearAdvancedDitherPreview(player.canvas);
+  }
 }
 
 function renderPreview(previewData, scale){
@@ -2108,7 +2779,7 @@ function renderPreview(previewData, scale){
   frame.style.width = `${dims.width}px`;
   frame.style.height = `${dims.height}px`;
   const dpr = Math.max(1, window.devicePixelRatio || 1);
-  if(previewData.type === 'mask' || previewData.type === 'ascii' || previewData.type === 'thermal'){
+  if(previewData.type === 'mask' || previewData.type === 'ascii' || previewData.type === 'thermal' || previewData.type === 'advanced-base'){
     const canvas = document.createElement('canvas');
     const cssWidth = Math.max(1, dims.width);
     const cssHeight = Math.max(1, dims.height);
@@ -2119,6 +2790,7 @@ function renderPreview(previewData, scale){
     canvas.style.height = `${cssHeight}px`;
     canvas.style.imageRendering = 'pixelated';
     frame.appendChild(canvas);
+    scheduleAdvancedDitherPreview(canvas);
     updatePlaybackButton(false);
   }else if(previewData.type === 'animation'){
     const canvas = document.createElement('canvas');
@@ -2137,17 +2809,60 @@ function renderPreview(previewData, scale){
 
 let glowHelperCanvas = null;
 let glowHelperCtx = null;
+let imageFrameCanvas = null;
+let imageFrameCtx = null;
 
 function paintFrame(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   const type = data.type || data.kind || (data.mask ? 'mask' : 'ascii');
-  if(type === 'ascii'){
+  if(type === 'bitmap'){
+    paintBitmapFrame(ctx, data, outWidth, outHeight);
+  }else if(type === 'image-data'){
+    paintImageDataFrame(ctx, data, outWidth, outHeight);
+  }else if(type === 'ascii'){
     paintAscii(ctx, data, outWidth, outHeight);
   }else if(type === 'thermal'){
     paintThermal(ctx, data, outWidth, outHeight);
+  }else if(type === 'advanced-base'){
+    paintAdvancedBase(ctx, data, outWidth, outHeight);
   }else{
     paintMask(ctx, data, outWidth, outHeight);
   }
+}
+
+function paintBitmapFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const source = data.bitmap || data.image || data.canvas;
+  if(source){
+    ctx.drawImage(source, 0, 0, outWidth, outHeight);
+  }
+  ctx.restore();
+}
+
+function paintImageDataFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data || !data.imageData) return;
+  const imageData = data.imageData;
+  const width = imageData.width;
+  const height = imageData.height;
+  if(!width || !height) return;
+  if(!imageFrameCanvas || imageFrameCanvas.width !== width || imageFrameCanvas.height !== height){
+    imageFrameCanvas = document.createElement('canvas');
+    imageFrameCanvas.width = width;
+    imageFrameCanvas.height = height;
+    imageFrameCtx = imageFrameCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if(!imageFrameCtx) return;
+  imageFrameCtx.putImageData(imageData, 0, 0);
+  paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
 }
 
 function paintMask(ctx, data, outWidth, outHeight){
@@ -2253,6 +2968,55 @@ function paintThermal(ctx, data, outWidth, outHeight){
       ctx.fillStyle = color;
       const drawX = x * cellWidth;
       ctx.fillRect(drawX, drawY, cellWidth, cellHeight);
+    }
+  }
+  ctx.restore();
+}
+
+function paintAdvancedBase(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const gridWidth = Math.max(1, data.gridWidth || 0);
+  const gridHeight = Math.max(1, data.gridHeight || 0);
+  const tile = data.tile != null ? data.tile : 1;
+  const tonal = data.tonal ? ensureUint8Array(data.tonal) : null;
+  const colors = data.colors ? ensureUint8Array(data.colors) : null;
+  if((!tonal || tonal.length < gridWidth * gridHeight) && (!colors || colors.length < gridWidth * gridHeight * 3)){
+    ctx.restore();
+    return;
+  }
+  const baseWidth = gridWidth * tile;
+  const baseHeight = gridHeight * tile;
+  const scaleX = baseWidth ? outWidth / baseWidth : 1;
+  const scaleY = baseHeight ? outHeight / baseHeight : 1;
+  for(let y=0;y<gridHeight;y++){
+    const rowOffset = y * gridWidth;
+    const drawY = y * tile * scaleY;
+    for(let x=0;x<gridWidth;x++){
+      const idx = rowOffset + x;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      if(colors && colors.length >= (idx * 3 + 3)){
+        const base = idx * 3;
+        r = colors[base];
+        g = colors[base + 1];
+        b = colors[base + 2];
+      }else if(tonal && tonal.length > idx){
+        const tone = tonal[idx];
+        r = g = b = tone;
+      }
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      const drawX = x * tile * scaleX;
+      ctx.fillRect(drawX, drawY, tile * scaleX, tile * scaleY);
     }
   }
   ctx.restore();
@@ -2617,6 +3381,7 @@ async function downloadRaster(format){
   const background = controls.rasterBG ? controls.rasterBG.value : '#ffffff';
   const dpi = getSelectedDPI();
   const canvas = await rasterizeSVGToCanvas(svgString, dims.width, dims.height, background);
+  await applyAdvancedDitherToCanvas(canvas, { preview: false });
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
   const blob = await canvasToBlobWithDPI(canvas, format, quality, dpi);
   triggerDownload(blob, format === 'image/png' ? 'bitmap.png' : 'bitmap.jpg');
@@ -2627,7 +3392,10 @@ async function downloadGIF(){
   const options = collectRenderOptions();
   const exportData = await getVideoExportData(options);
   const dims = alignVideoExportDimensions(getExportDimensions(), exportData.baseWidth, exportData.baseHeight);
-  const indexedFrames = exportData.frames.map((frame) => frameToIndexedFrame(frame, dims.width, dims.height, options));
+  const indexedFrames = [];
+  for(const frame of exportData.frames){
+    indexedFrames.push(await frameToIndexedFrame(frame, dims.width, dims.height, options));
+  }
   if(!indexedFrames.length){
     throw new Error('Nessun frame disponibile per la GIF');
   }
@@ -2690,6 +3458,7 @@ async function downloadMP4(){
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, dims.width, dims.height);
     paintFrame(ctx, frameData, dims.width, dims.height);
+    await applyAdvancedDitherToCanvas(canvas, { preview: false });
     const delay = Math.max(16, exportData.durations[i] || Math.round(1000/fps));
     await wait(delay);
   }
@@ -2849,7 +3618,7 @@ function asciiFrameToBinaryFrame(frame, outWidth, outHeight, options){
   return binary;
 }
 
-function frameToIndexedFrame(frame, outWidth, outHeight, options){
+async function frameToIndexedFrame(frame, outWidth, outHeight, options){
   if(!frame){
     return {
       indexes: new Uint8Array(Math.max(1, Math.round(outWidth || 1)) * Math.max(1, Math.round(outHeight || 1))),
@@ -2857,15 +3626,45 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
       transparentIndex: 0
     };
   }
-  const tile = frame.tile != null ? frame.tile : options.px;
+  const tile = frame.tile != null ? frame.tile : (options && options.px != null ? options.px : 1);
+  const width = Math.max(1, Math.round(outWidth || frame.outputWidth || (frame.gridWidth * tile) || 1));
+  const height = Math.max(1, Math.round(outHeight || frame.outputHeight || (frame.gridHeight * tile) || 1));
+  if(buildAdvancedDitherChain().length){
+    const canvas = createExportCanvas(width, height, {forceDOM: true});
+    const ctx = canvas.getContext('2d', {alpha: options && options.bg === 'transparent'});
+    if(ctx){
+      const frameData = {
+        ...frame,
+        type: frame.kind,
+        bg: options && options.bg != null ? options.bg : 'transparent',
+        fg: options && options.fg != null ? options.fg : '#000000',
+        glow: options && options.glow != null ? options.glow : 0
+      };
+      paintFrame(ctx, frameData, width, height);
+      await applyAdvancedDitherToCanvas(canvas, { preview: false });
+      let imageData = null;
+      try{
+        imageData = ctx.getImageData(0, 0, width, height);
+      }catch(err){
+        imageData = null;
+      }
+      if(imageData){
+        const samples = [];
+        const hasTrans = collectGifColorSamples(imageData, samples, options && options.bg === 'transparent');
+        const paletteInfo = buildGifPalette(samples, hasTrans);
+        const indexes = imageDataToPaletteIndexes(imageData, paletteInfo.palette, paletteInfo.transparentIndex);
+        return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
+      }
+    }
+  }
   if(frame.kind === 'thermal'){
     const palette = ensureUint8Array(frame.palette) || getPaletteByKey(frame.paletteKey) || THERMAL_PALETTE;
     const indexes = resamplePaletteFrame(
       ensureUint8Array(frame.indexes),
       frame.gridWidth,
       frame.gridHeight,
-      outWidth,
-      outHeight,
+      width,
+      height,
       tile
     );
     return {indexes, palette, transparentIndex: -1, paletteKey: frame.paletteKey || (palette === THERMAL_PALETTE ? THERMAL_PALETTE_KEY : undefined)};
@@ -2873,17 +3672,17 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
   if(frame.kind === 'ascii'){
     const hasColors = frame.colors && frame.colors.length;
     const asciiOverrides = hasColors
-      ? { bg: options.bg != null ? options.bg : 'transparent', fg: options.fg, glow: 0 }
+      ? { bg: options && options.bg != null ? options.bg : 'transparent', fg: options && options.fg, glow: 0 }
       : { bg: 'transparent', fg: '#ffffff', glow: 0 };
-    const imageData = renderAsciiFrameImageData(frame, outWidth, outHeight, options, asciiOverrides);
+    const imageData = renderAsciiFrameImageData(frame, width, height, options, asciiOverrides);
     if(!imageData){
-      const fallbackIndexes = asciiFrameToBinaryFrame(frame, outWidth, outHeight, options);
-      const fallbackPalette = buildBinaryPalette(options.bg, options.fg);
+      const fallbackIndexes = asciiFrameToBinaryFrame(frame, width, height, options);
+      const fallbackPalette = buildBinaryPalette(options && options.bg, options && options.fg);
       return {indexes: fallbackIndexes, palette: fallbackPalette.palette, transparentIndex: fallbackPalette.transparentIndex};
     }
     if(hasColors){
       const samples = [];
-      const hasTrans = collectGifColorSamples(imageData, samples, options.bg === 'transparent');
+      const hasTrans = collectGifColorSamples(imageData, samples, options && options.bg === 'transparent');
       const paletteInfo = buildGifPalette(samples, hasTrans);
       const palette = paletteInfo.palette;
       const transparentIndex = paletteInfo.transparentIndex;
@@ -2895,18 +3694,18 @@ function frameToIndexedFrame(frame, outWidth, outHeight, options){
     for(let i=0, p=0;i<pixels.length;i+=4,p++){
       binary[p] = pixels[i+3] > 32 ? 1 : 0;
     }
-    const paletteInfo = buildBinaryPalette(options.bg, options.fg);
+    const paletteInfo = buildBinaryPalette(options && options.bg, options && options.fg);
     return {indexes: binary, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
   }
   const indexes = maskToBinaryFrame(
     frame.mask,
     frame.gridWidth,
     frame.gridHeight,
-    outWidth,
-    outHeight,
+    width,
+    height,
     tile
   );
-  const paletteInfo = buildBinaryPalette(options.bg, options.fg);
+  const paletteInfo = buildBinaryPalette(options && options.bg, options && options.fg);
   return {indexes, palette: paletteInfo.palette, transparentIndex: paletteInfo.transparentIndex};
 }
 
