@@ -30,6 +30,8 @@ for(const id of CONTROL_IDS){
 
 const MAX_UPLOAD_DIMENSION = 1200;
 const PREVIEW_MAX_DIMENSION = 360;
+const ADVANCED_PREVIEW_MAX_DIMENSION = 1024;
+const ADVANCED_VIDEO_PREVIEW_MAX_DIMENSION = 512;
 const VIDEO_PREVIEW_FPS = 8;
 const VIDEO_EXPORT_FPS = 12;
 const MAX_VIDEO_FRAMES = 240;
@@ -1089,7 +1091,7 @@ function buildAdvancedDitherChain(){
   return [{ name: def.id, params: { ...params, _globals: globals } }];
 }
 
-async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null } = {}){
+async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null, maxPreviewDimension = ADVANCED_PREVIEW_MAX_DIMENSION } = {}){
   if(!canvas) return;
   const chain = effects && effects.length ? effects : buildAdvancedDitherChain();
   if(!chain.length) return;
@@ -1099,7 +1101,7 @@ async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = nu
       : () => state.advancedDitherPreviewTokens.get(canvas) !== token;
     await applyToCanvas(canvas, chain, {
       preview,
-      maxDimension: preview ? 1024 : undefined,
+      maxDimension: preview ? maxPreviewDimension : undefined,
       shouldAbort
     });
   }catch(err){
@@ -1121,7 +1123,7 @@ function scheduleAdvancedDitherPreview(canvas){
   requestAnimationFrame(() => {
     if(state.advancedDitherActiveCanvas !== canvas) return;
     if(state.advancedDitherPreviewTokens.get(canvas) !== token) return;
-    applyAdvancedDitherToCanvas(canvas, { preview: true, token });
+    applyAdvancedDitherToCanvas(canvas, { preview: true, token, maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION });
   });
 }
 
@@ -2228,10 +2230,23 @@ async function buildAnimationPreviewData(frames, options, durations, fps){
   let renderCtx = null;
   const alpha = !options.bg || options.bg === 'transparent';
   const advancedChain = buildAdvancedDitherChain();
+  const advancedPreviewScale = needsAdvanced
+    ? Math.min(1, ADVANCED_VIDEO_PREVIEW_MAX_DIMENSION / Math.max(Math.max(width, height), 1))
+    : 1;
+  const advancedPreviewWidth = needsAdvanced
+    ? Math.max(1, Math.round(width * advancedPreviewScale))
+    : width;
+  const advancedPreviewHeight = needsAdvanced
+    ? Math.max(1, Math.round(height * advancedPreviewScale))
+    : height;
   for(const frame of frames){
     if(needsAdvanced && frame && frame.kind === 'advanced-base' && advancedChain.length){
       if(!renderCanvas){
-        renderCanvas = createExportCanvas(width, height, {forceDOM: true});
+        renderCanvas = createExportCanvas(advancedPreviewWidth, advancedPreviewHeight, {forceDOM: true});
+        renderCtx = renderCanvas.getContext('2d', {alpha});
+      }else if(renderCanvas.width !== advancedPreviewWidth || renderCanvas.height !== advancedPreviewHeight){
+        renderCanvas.width = advancedPreviewWidth;
+        renderCanvas.height = advancedPreviewHeight;
         renderCtx = renderCanvas.getContext('2d', {alpha});
       }
       if(renderCtx){
@@ -2246,8 +2261,12 @@ async function buildAnimationPreviewData(frames, options, durations, fps){
           bg: options.bg,
           fg: options.fg,
           glow: options.glow
-        }, width, height);
-        await applyAdvancedDitherToCanvas(renderCanvas, { preview: true, effects: advancedChain });
+        }, advancedPreviewWidth, advancedPreviewHeight);
+        await applyAdvancedDitherToCanvas(renderCanvas, {
+          preview: true,
+          effects: advancedChain,
+          maxPreviewDimension: Math.max(advancedPreviewWidth, advancedPreviewHeight)
+        });
         let bitmap = null;
         if(typeof renderCanvas.transferToImageBitmap === 'function'){
           try{
