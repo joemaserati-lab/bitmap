@@ -312,7 +312,9 @@ const state = {
   asciiWordString: normalizeASCIIWordString(DEFAULT_ASCII_WORD),
   advancedDitherSettings: {},
   advancedDitherControls: new Map(),
-  advancedDitherActiveCanvas: null
+  advancedDitherActiveCanvas: null,
+  advancedDitherPreviewTokens: new WeakMap(),
+  advancedDitherJobCounter: 0
 };
 
 let renderQueued = false;
@@ -1072,12 +1074,19 @@ function buildAdvancedDitherChain(){
   return [{ name: def.id, params: { ...params, _globals: globals } }];
 }
 
-async function applyAdvancedDitherToCanvas(canvas, { preview = false } = {}){
+async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null } = {}){
   if(!canvas) return;
   const effects = buildAdvancedDitherChain();
   if(!effects.length) return;
   try{
-    await applyToCanvas(canvas, effects, { preview, maxDimension: preview ? 1024 : undefined });
+    const shouldAbort = token == null
+      ? undefined
+      : () => state.advancedDitherPreviewTokens.get(canvas) !== token;
+    await applyToCanvas(canvas, effects, {
+      preview,
+      maxDimension: preview ? 1024 : undefined,
+      shouldAbort
+    });
   }catch(err){
     console.warn('[dither] applicazione avanzata fallita', err);
   }
@@ -1086,10 +1095,18 @@ async function applyAdvancedDitherToCanvas(canvas, { preview = false } = {}){
 function scheduleAdvancedDitherPreview(canvas){
   state.advancedDitherActiveCanvas = canvas || null;
   const effects = buildAdvancedDitherChain();
-  if(!effects.length || !canvas) return;
+  if(!effects.length || !canvas){
+    if(canvas){
+      state.advancedDitherPreviewTokens.delete(canvas);
+    }
+    return;
+  }
+  const token = ++state.advancedDitherJobCounter;
+  state.advancedDitherPreviewTokens.set(canvas, token);
   requestAnimationFrame(() => {
     if(state.advancedDitherActiveCanvas !== canvas) return;
-    applyAdvancedDitherToCanvas(canvas, { preview: true });
+    if(state.advancedDitherPreviewTokens.get(canvas) !== token) return;
+    applyAdvancedDitherToCanvas(canvas, { preview: true, token });
   });
 }
 
