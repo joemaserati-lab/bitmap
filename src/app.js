@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 
 const preview = $('preview');
 const meta = $('meta');
+const previewNotice = $('previewNotice');
 const uploadMessage = $('uploadMessage');
 const progressWrap = $('uploadProgressWrapper');
 const progressBar = $('uploadProgressBar');
@@ -44,6 +45,20 @@ const DEFAULT_ASCII_WORD = 'PIXEL';
 const ASCII_MIN_TILE = 8;
 const ASCII_CUSTOM_MAX = 64;
 const ASCII_WORD_MAX = 32;
+const ADVANCED_VIDEO_NOTICE = 'RIPRODUZIONE VIDEO LIMITATA: QUESTO DITHERING AVANZATO È VISIBILE SOLO IN PAUSA ED È SEMPRE APPLICATO IN EXPORT.';
+const CPU_ONLY_ADVANCED_DITHERS = new Set([
+  'blueNoise',
+  'clusteredDot',
+  'dotDiffusion',
+  'edKernels',
+  'paletteDither',
+  'autoQuant',
+  'cmykHalftone',
+  'halftoneShapes',
+  'lineDither',
+  'hatching',
+  'stippling'
+]);
 
 const ASCII_CHARSETS = {
   ascii_simple: [' ','.',':','-','=','+','#','@'],
@@ -332,6 +347,17 @@ function disposePreviewAssets(){
     }
   }
   state.previewDisposables = [];
+}
+
+function updatePreviewNotice(message){
+  if(!previewNotice) return;
+  if(message){
+    previewNotice.textContent = message;
+    previewNotice.hidden = false;
+  }else{
+    previewNotice.textContent = '';
+    previewNotice.hidden = true;
+  }
 }
 
 let renderQueued = false;
@@ -855,6 +881,7 @@ function bindPlaybackControl(){
     }else{
       updatePlaybackButton(true, false);
     }
+    drawAnimationFrame(player, player.frameIndex);
   });
 }
 
@@ -1137,6 +1164,10 @@ function clearAdvancedDitherPreview(canvas){
 
 function isAdvancedDitherMode(mode){
   return Boolean(getAdvancedDitherDefinition(mode));
+}
+
+function isCpuOnlyAdvancedDither(mode){
+  return CPU_ONLY_ADVANCED_DITHERS.has(mode);
 }
 
 function parsePaletteValue(value, fallback){
@@ -1863,6 +1894,8 @@ async function generateVideoPreview(options){
     updateExportButtons();
     return;
   }
+  const advancedMode = isAdvancedDitherMode(options.mode);
+  const cpuOnlyAdvanced = advancedMode && isCpuOnlyAdvancedDither(options.mode);
   const frames = [];
   const durations = (video.previewDurations && video.previewDurations.length === video.previewFrames.length)
     ? video.previewDurations.slice()
@@ -1890,7 +1923,17 @@ async function generateVideoPreview(options){
   state.lastResultId = state.currentJobId;
   state.lastSVG = '';
   state.lastSVGJob = 0;
-  const previewData = await buildAnimationPreviewData(frames, options, durations, video.previewFPS || VIDEO_PREVIEW_FPS);
+  const previewData = await buildAnimationPreviewData(
+    frames,
+    options,
+    durations,
+    video.previewFPS || VIDEO_PREVIEW_FPS,
+    {
+      disableAdvancedPreview: cpuOnlyAdvanced,
+      autoplay: !cpuOnlyAdvanced,
+      notice: cpuOnlyAdvanced ? ADVANCED_VIDEO_NOTICE : ''
+    }
+  );
   disposePreviewAssets();
   state.lastPreview = previewData;
   state.previewDisposables = previewData && previewData.disposables ? previewData.disposables : [];
@@ -2215,7 +2258,7 @@ function buildPreviewData(frame, options){
   };
 }
 
-async function buildAnimationPreviewData(frames, options, durations, fps){
+async function buildAnimationPreviewData(frames, options, durations, fps, extras={}){
   if(!frames || !frames.length){
     return null;
   }
@@ -2224,12 +2267,15 @@ async function buildAnimationPreviewData(frames, options, durations, fps){
   const height = Math.max(1, Math.round(first.outputHeight));
   const previewFrames = [];
   const disposables = [];
+  const disableAdvancedPreview = Boolean(extras.disableAdvancedPreview);
+  const autoplay = extras.autoplay !== undefined ? !!extras.autoplay : true;
+  const notice = typeof extras.notice === 'string' ? extras.notice : '';
   const hasAdvancedFrames = frames.some((frame) => frame && frame.kind === 'advanced-base');
-  const needsAdvanced = hasAdvancedFrames && buildAdvancedDitherChain().length > 0;
+  const advancedChain = disableAdvancedPreview ? [] : buildAdvancedDitherChain();
+  const needsAdvanced = hasAdvancedFrames && advancedChain.length > 0;
   let renderCanvas = null;
   let renderCtx = null;
   const alpha = !options.bg || options.bg === 'transparent';
-  const advancedChain = buildAdvancedDitherChain();
   const advancedPreviewScale = needsAdvanced
     ? Math.min(1, ADVANCED_VIDEO_PREVIEW_MAX_DIMENSION / Math.max(Math.max(width, height), 1))
     : 1;
@@ -2350,7 +2396,10 @@ async function buildAnimationPreviewData(frames, options, durations, fps){
     fg: options.fg,
     glow: options.glow,
     fps: derivedFPS,
-    disposables
+    disposables,
+    disableAdvancedPreview,
+    autoplay,
+    notice
   };
 }
 
@@ -2729,6 +2778,7 @@ function startPreviewAnimation(canvas, data, width, height, dpr){
   if(dpr && dpr !== 1){
     ctx.scale(dpr, dpr);
   }
+  const autoplay = data.autoplay !== false;
   const player = {
     canvas,
     ctx,
@@ -2736,13 +2786,14 @@ function startPreviewAnimation(canvas, data, width, height, dpr){
     frameIndex: 0,
     accumulator: 0,
     lastTime: 0,
-    playing: true,
+    playing: autoplay,
     rafId: 0,
     width,
-    height
+    height,
+    disableAdvancedPreview: Boolean(data.disableAdvancedPreview)
   };
   state.previewPlayer = player;
-  updatePlaybackButton(true, true);
+  updatePlaybackButton(true, autoplay);
   drawAnimationFrame(player, 0);
   const step = (timestamp) => {
     if(state.previewPlayer !== player){
@@ -2778,13 +2829,18 @@ function drawAnimationFrame(player, index){
   };
   paintFrame(player.ctx, frameData, player.width || player.canvas.width, player.height || player.canvas.height);
   if(frameData.type === 'advanced-base'){
-    scheduleAdvancedDitherPreview(player.canvas);
+    if(player.disableAdvancedPreview && player.playing){
+      clearAdvancedDitherPreview(player.canvas);
+    }else{
+      scheduleAdvancedDitherPreview(player.canvas);
+    }
   }else{
     clearAdvancedDitherPreview(player.canvas);
   }
 }
 
 function renderPreview(previewData, scale){
+  updatePreviewNotice(previewData && previewData.notice ? previewData.notice : '');
   if(!preview) return;
   preview.innerHTML = '';
   stopPreviewAnimation();
