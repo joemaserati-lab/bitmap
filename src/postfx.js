@@ -127,7 +127,7 @@ export async function runPostEffects(imageData, effects, { preview = false } = {
   return processOnMain(imageData, effects);
 }
 
-export async function applyToCanvas(canvas, effects, { preview = false, maxDimension = 1024 } = {}){
+export async function applyToCanvas(canvas, effects, { preview = false, maxDimension = 1024, shouldAbort } = {}){
   if(!canvas || !effects || !effects.length){
     return;
   }
@@ -147,29 +147,44 @@ export async function applyToCanvas(canvas, effects, { preview = false, maxDimen
   ctx.drawImage(canvas, 0, 0, workWidth, workHeight);
   const imageData = ctx.getImageData(0, 0, workWidth, workHeight);
   const processed = await runPostEffects(imageData, effects, { preview });
+  if(typeof shouldAbort === 'function' && shouldAbort()){
+    return;
+  }
   ctx.putImageData(processed, 0, 0);
   const targetCtx = canvas.getContext('2d');
   if(!targetCtx){
     return;
   }
+  if(typeof shouldAbort === 'function' && shouldAbort()){
+    return;
+  }
   targetCtx.save();
-  targetCtx.globalCompositeOperation = 'source-over';
-  if(typeof targetCtx.resetTransform === 'function'){
-    targetCtx.resetTransform();
-  }else{
-    targetCtx.setTransform(1, 0, 0, 1, 0, 0);
-  }
-  targetCtx.imageSmoothingEnabled = false;
-  targetCtx.clearRect(0, 0, width, height);
-  if(preview && (workWidth !== width || workHeight !== height)){
-    const source = supportsOffscreen ? previewCanvas : fallbackCanvas;
-    if(source){
-      targetCtx.drawImage(source, 0, 0, width, height);
+  try{
+    targetCtx.globalCompositeOperation = 'source-over';
+    if(typeof targetCtx.resetTransform === 'function'){
+      targetCtx.resetTransform();
+    }else{
+      targetCtx.setTransform(1, 0, 0, 1, 0, 0);
     }
-  }else{
-    targetCtx.putImageData(processed, 0, 0);
+    targetCtx.imageSmoothingEnabled = false;
+    if(typeof shouldAbort === 'function' && shouldAbort()){
+      return;
+    }
+    targetCtx.clearRect(0, 0, width, height);
+    if(typeof shouldAbort === 'function' && shouldAbort()){
+      return;
+    }
+    if(preview && (workWidth !== width || workHeight !== height)){
+      const source = supportsOffscreen ? previewCanvas : fallbackCanvas;
+      if(source){
+        targetCtx.drawImage(source, 0, 0, width, height);
+      }
+    }else{
+      targetCtx.putImageData(processed, 0, 0);
+    }
+  }finally{
+    targetCtx.restore();
   }
-  targetCtx.restore();
 }
 
 function waitForIdle(){
