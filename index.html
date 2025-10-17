@@ -15,7 +15,10 @@
     <div id="preview" class="preview-box"></div>
     <div class="preview-footer">
       <button id="togglePlayback" class="playback-btn" type="button" hidden aria-pressed="true">PAUSA</button>
-      <div id="meta" class="meta"></div>
+      <div class="preview-footer__stack">
+        <div id="meta" class="meta"></div>
+        <div id="previewNotice" class="preview-notice" hidden aria-live="polite"></div>
+      </div>
     </div>
   </section>
   <aside class="controls-panel">
@@ -42,6 +45,55 @@
       </div>
     </div>
     <div class="controls-body">
+      <div class="dither-dock">
+        <div class="field field--dither">
+          <label>DITHERING</label>
+          <select id="dither">
+            <option value="none">NONE</option>
+            <option value="fs">FLOYD–STEINBERG</option>
+            <option value="atkinson">ATKINSON</option>
+            <option value="jjn">JJN</option>
+            <option value="stucki">STUCKI</option>
+            <option value="burkes">BURKES</option>
+            <option value="sierra2">SIERRA 2</option>
+            <option value="bayer4">BAYER 4</option>
+            <option value="bayer8">BAYER 8</option>
+            <option value="cross">CROSS-HATCH</option>
+            <option value="halftone">HALFTONE</option>
+            <option value="halftone_motion">HALFTONE MOTION</option>
+            <option value="thermal">THERMAL PIXEL</option>
+            <option value="blueNoise">BLUE NOISE</option>
+            <option value="clusteredDot">CLUSTERED DOT</option>
+            <option value="dotDiffusion">DOT DIFFUSION</option>
+            <option value="edKernels">ERROR DIFFUSION+</option>
+            <option value="paletteDither">PALETTE DITHER</option>
+            <option value="autoQuant">AUTO QUANT</option>
+            <option value="cmykHalftone">CMYK HALFTONE</option>
+            <option value="halftoneShapes">HALFTONE SHAPES</option>
+            <option value="lineDither">LINE DITHER</option>
+            <option value="hatching">HATCHING</option>
+            <option value="stippling">STIPPLING</option>
+            <option value="ascii_simple">ASCII SIMPLE</option>
+            <option value="ascii_pixel">ASCII PIXEL</option>
+            <option value="ascii_unicode">ASCII UNICODE</option>
+            <option value="ascii_word">ASCII WORD</option>
+            <option value="ascii_custom">ASCII CUSTOM</option>
+          </select>
+        </div>
+        <div id="ditherAdvancedPanel" class="dither-advanced" hidden>
+          <div id="ditherAdvancedControls" class="dither-advanced__controls"></div>
+        </div>
+        <div id="asciiCustomField" class="field field--ascii-custom" hidden>
+          <label>ASCII CHARACTERS</label>
+          <input id="asciiChars" type="text" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" maxlength="64" value=" .:-=+*#%@">
+          <small class="muted">Ordina i caratteri dal più chiaro al più scuro.</small>
+        </div>
+        <div id="asciiWordField" class="field field--ascii-word" hidden>
+          <label>ASCII WORD</label>
+          <input id="asciiWord" type="text" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="characters" maxlength="32" value="PIXEL">
+          <small class="muted">Scegli la parola per riempire le ombre.</small>
+        </div>
+      </div>
       <section class="control-section">
         <h2 class="section-title">PIXEL</h2>
         <div class="fields-rail">
@@ -67,18 +119,20 @@
         <div class="fields-rail">
           <div class="field"><label>STYLE</label><select id="style"><option value="solid">SOLID</option><option value="outline">OUTLINE</option><option value="ring">RING</option></select></div>
           <div class="field"><label>OUTLINE THICKNESS</label><div class="slider"><input id="thickness" type="range" min="1" max="6" step="1" value="2"><input id="thicknessNum" class="num" type="number" min="1" max="6" step="1" value="2"></div></div>
-          <div class="field"><label>DITHERING</label><select id="dither"><option value="none">NONE</option><option value="fs">FLOYD–STEINBERG</option><option value="atkinson">ATKINSON</option><option value="jjn">JJN</option><option value="stucki">STUCKI</option><option value="burkes">BURKES</option><option value="sierra2">SIERRA 2</option><option value="bayer4">BAYER 4</option><option value="bayer8">BAYER 8</option><option value="cross">CROSS-HATCH</option><option value="halftone">HALFTONE</option><option value="halftone_motion">HALFTONE MOTION</option><option value="thermal">THERMAL PIXEL</option><option value="ascii_simple">ASCII SIMPLE</option><option value="ascii_pixel">ASCII PIXEL</option><option value="ascii_unicode">ASCII UNICODE</option><option value="ascii_word">ASCII WORD</option><option value="ascii_custom">ASCII CUSTOM</option></select></div>
-          <div id="asciiCustomField" class="field field--ascii-custom" hidden>
-            <label>ASCII CHARACTERS</label>
-            <input id="asciiChars" type="text" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" maxlength="64" value=" .:-=+*#%@">
-            <small class="muted">Ordina i caratteri dal più chiaro al più scuro.</small>
+          <div class="field field--gradient">
+            <label>GRADIENT MAP</label>
+            <select id="gradientMap"></select>
+            <div id="gradientPreview" class="gradient-preview" hidden></div>
           </div>
-          <div id="asciiWordField" class="field field--ascii-word" hidden>
-            <label>ASCII WORD</label>
-            <input id="asciiWord" type="text" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="characters" maxlength="32" value="PIXEL">
-            <small class="muted">Scegli la parola per riempire le ombre.</small>
+          <div class="field field--invert">
+            <label>INVERT</label>
+            <div class="invert-toggle" role="group" aria-label="Inverti">
+              <button type="button" class="invert-toggle__btn" data-invert-option="auto">AUTO</button>
+              <button type="button" class="invert-toggle__btn" data-invert-option="no">NO</button>
+              <button type="button" class="invert-toggle__btn" data-invert-option="yes">YES</button>
+            </div>
+            <input id="invert" type="hidden" value="auto">
           </div>
-          <div class="field"><label>INVERT</label><select id="invert"><option value="auto">AUTO</option><option value="no">NO</option><option value="yes">YES</option></select></div>
           <div class="field"><label>BG</label><input id="bg" type="color" value="#ffffff"></div>
           <div class="field"><label>FG</label><input id="fg" type="color" value="#000000"></div>
         </div>
