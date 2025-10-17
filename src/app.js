@@ -287,6 +287,53 @@ function getParsedGradientById(id){
   return getParsedGradient(entry);
 }
 
+function getGradientStopsById(id){
+  const entry = getGradientEntry(id);
+  if(!entry){
+    return null;
+  }
+  let stops = Array.isArray(entry.stops) ? entry.stops : null;
+  if(!stops || stops.length < 2){
+    const parsed = getParsedGradient(entry);
+    if(parsed && Array.isArray(parsed.stops)){
+      const mapped = [];
+      for(const stop of parsed.stops){
+        if(stop && typeof stop.color === 'string'){
+          mapped.push(hexToRGB(stop.color));
+        }
+      }
+      if(mapped.length >= 2){
+        entry.stops = mapped;
+        stops = mapped;
+      }
+    }
+  }
+  if(!stops || stops.length < 2){
+    return null;
+  }
+  return stops.map((stop) => [stop[0], stop[1], stop[2]]);
+}
+
+function stopsMatch(a, b){
+  if(!Array.isArray(a) || !Array.isArray(b)){
+    return false;
+  }
+  if(a.length !== b.length){
+    return false;
+  }
+  for(let i=0;i<a.length;i++){
+    const sa = a[i];
+    const sb = b[i];
+    if(!Array.isArray(sa) || !Array.isArray(sb)){
+      return false;
+    }
+    if(sa[0] !== sb[0] || sa[1] !== sb[1] || sa[2] !== sb[2]){
+      return false;
+    }
+  }
+  return true;
+}
+
 function ensureAsciiMeasureContext(){
   if(asciiMeasureCtx){ return asciiMeasureCtx; }
   if(typeof document === 'undefined'){ return null; }
@@ -1574,12 +1621,25 @@ function buildAdvancedDitherChain(){
     background: base.bg,
     foreground: base.fg
   };
-  return [{ name: def.id, params: { ...params, _globals: globals } }];
+  const chain = [{ name: def.id, params: { ...params, _globals: globals } }];
+  const gradientId = base.gradientMap;
+  if(gradientId && gradientId !== 'none'){
+    const stops = getGradientStopsById(gradientId);
+    if(stops && stops.length >= 2){
+      chain.push({ name: 'gradientMap', params: { stops, mix: 1 } });
+    }
+  }
+  return chain;
 }
 
 async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null, maxPreviewDimension = ADVANCED_PREVIEW_MAX_DIMENSION, gradient = null } = {}){
   if(!canvas) return;
   const chain = effects && effects.length ? effects : buildAdvancedDitherChain();
+  const hasGradientEffect = chain.some((fx) => fx && fx.name === 'gradientMap');
+  const targetGradientStops = gradient && gradient !== 'none' ? getGradientStopsById(gradient) : null;
+  const gradientEffectMatches = hasGradientEffect && targetGradientStops
+    ? chain.some((fx) => fx && fx.name === 'gradientMap' && Array.isArray(fx.params && fx.params.stops) && stopsMatch(fx.params.stops, targetGradientStops))
+    : false;
   if(!chain.length) return;
   try{
     const shouldAbort = token == null
@@ -1593,7 +1653,7 @@ async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = nu
     if(typeof shouldAbort === 'function' && shouldAbort()){
       return;
     }
-    if(gradient && gradient !== 'none'){
+    if(gradient && gradient !== 'none' && !gradientEffectMatches){
       const ctx = canvas.getContext('2d');
       if(ctx){
         applyGradientOverlay(ctx, gradient, canvas.width, canvas.height);
@@ -1687,6 +1747,7 @@ function getVideoFrameTime(player, index){
 async function scheduleCpuVideoPreview(player, index){
   if(!player || !player.canvas) return;
   const effects = buildAdvancedDitherChain();
+  const hasGradientEffect = effects.some((fx) => fx && fx.name === 'gradientMap');
   if(!effects.length){
     return;
   }
@@ -1742,7 +1803,11 @@ async function scheduleCpuVideoPreview(player, index){
             }
             ctx.drawImage(helper.canvas, 0, 0, player.width, player.height);
             const gradientKey = (frame && frame.gradient) || player.data.gradient || state.gradientMap || 'none';
-            if(gradientKey && gradientKey !== 'none'){
+            const frameStops = gradientKey && gradientKey !== 'none' ? getGradientStopsById(gradientKey) : null;
+            const gradientEffectMatches = hasGradientEffect && frameStops
+              ? effects.some((fx) => fx && fx.name === 'gradientMap' && Array.isArray(fx.params && fx.params.stops) && stopsMatch(fx.params.stops, frameStops))
+              : false;
+            if(gradientKey && gradientKey !== 'none' && !gradientEffectMatches){
               applyGradientOverlay(ctx, gradientKey, player.width, player.height);
             }
           }finally{
