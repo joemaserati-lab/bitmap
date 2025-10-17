@@ -1602,31 +1602,37 @@ function prepareAdvancedDitherParams(def, params){
 function buildAdvancedDitherChain(){
   const mode = controls.dither ? controls.dither.value : 'none';
   const def = getAdvancedDitherDefinition(mode);
-  if(!def) return [];
-  const settings = state.advancedDitherSettings[def.id];
-  if(!settings) return [];
-  const params = prepareAdvancedDitherParams(def, settings.params);
   const base = collectRenderOptions();
-  const globals = {
-    pixelSize: base.px,
-    threshold: base.thr,
-    blur: base.blurPx,
-    grain: base.grain,
-    blackPoint: base.bp,
-    whitePoint: base.wp,
-    gamma: base.gam,
-    brightness: base.bri,
-    contrast: base.con,
-    invertMode: base.invertMode,
-    background: base.bg,
-    foreground: base.fg
-  };
-  const chain = [{ name: def.id, params: { ...params, _globals: globals } }];
   const gradientId = base.gradientMap;
-  if(gradientId && gradientId !== 'none'){
-    const stops = getGradientStopsById(gradientId);
-    if(stops && stops.length >= 2){
-      chain.push({ name: 'gradientMap', params: { stops, mix: 1 } });
+  const gradientStops = gradientId && gradientId !== 'none'
+    ? getGradientStopsById(gradientId)
+    : null;
+  const chain = [];
+  if(def){
+    const settings = state.advancedDitherSettings[def.id];
+    if(settings){
+      const params = prepareAdvancedDitherParams(def, settings.params);
+      const globals = {
+        pixelSize: base.px,
+        threshold: base.thr,
+        blur: base.blurPx,
+        grain: base.grain,
+        blackPoint: base.bp,
+        whitePoint: base.wp,
+        gamma: base.gam,
+        brightness: base.bri,
+        contrast: base.con,
+        invertMode: base.invertMode,
+        background: base.bg,
+        foreground: base.fg
+      };
+      chain.push({ name: def.id, params: { ...params, _globals: globals } });
+    }
+  }
+  if(gradientStops && gradientStops.length >= 2){
+    const hasGradient = chain.some((fx) => fx && fx.name === 'gradientMap');
+    if(!hasGradient){
+      chain.push({ name: 'gradientMap', params: { stops: gradientStops, mix: 1 } });
     }
   }
   return chain;
@@ -3019,9 +3025,8 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
   const notice = typeof extras.notice === 'string' ? extras.notice : '';
   const hasVideoClass = typeof HTMLVideoElement !== 'undefined';
   const videoElement = hasVideoClass && extras.videoElement instanceof HTMLVideoElement ? extras.videoElement : null;
-  const hasAdvancedFrames = frames.some((frame) => frame && frame.kind === 'advanced-base');
   const advancedChain = disableAdvancedPreview ? [] : buildAdvancedDitherChain();
-  const needsAdvanced = hasAdvancedFrames && advancedChain.length > 0;
+  const needsAdvanced = advancedChain.length > 0;
   const defaultGradient = (options && options.gradientMap) || 'none';
   let renderCanvas = null;
   let renderCtx = null;
@@ -3036,7 +3041,7 @@ async function buildAnimationPreviewData(frames, options, durations, fps, extras
     ? Math.max(1, Math.round(height * advancedPreviewScale))
     : height;
   for(const frame of frames){
-    if(needsAdvanced && frame && frame.kind === 'advanced-base' && advancedChain.length){
+    if(needsAdvanced && advancedChain.length && frame){
       if(!renderCanvas){
         renderCanvas = createExportCanvas(advancedPreviewWidth, advancedPreviewHeight, {forceDOM: true});
         renderCtx = renderCanvas.getContext('2d', {alpha});
@@ -3838,6 +3843,41 @@ function paintImageDataFrame(ctx, data, outWidth, outHeight){
   paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
 }
 
+function paintBitmapFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const source = data.bitmap || data.image || data.canvas;
+  if(source){
+    ctx.drawImage(source, 0, 0, outWidth, outHeight);
+  }
+  ctx.restore();
+}
+
+function paintImageDataFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data || !data.imageData) return;
+  const imageData = data.imageData;
+  const width = imageData.width;
+  const height = imageData.height;
+  if(!width || !height) return;
+  if(!imageFrameCanvas || imageFrameCanvas.width !== width || imageFrameCanvas.height !== height){
+    imageFrameCanvas = document.createElement('canvas');
+    imageFrameCanvas.width = width;
+    imageFrameCanvas.height = height;
+    imageFrameCtx = imageFrameCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if(!imageFrameCtx) return;
+  imageFrameCtx.putImageData(imageData, 0, 0);
+  paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
+}
+
 function paintMask(ctx, data, outWidth, outHeight){
   if(!ctx || !data) return;
   ctx.save();
@@ -4359,9 +4399,13 @@ async function downloadRaster(format){
   if(effects.length){
     await applyAdvancedDitherToCanvas(canvas, { preview: false, effects, gradient: gradientSelection });
   }else if(gradientSelection && gradientSelection !== 'none'){
-    const ctx = canvas.getContext('2d');
-    if(ctx){
-      applyGradientOverlay(ctx, gradientSelection, canvas.width, canvas.height);
+    const stops = getGradientStopsById(gradientSelection);
+    if(stops && stops.length >= 2){
+      await applyAdvancedDitherToCanvas(canvas, {
+        preview: false,
+        effects: [{ name: 'gradientMap', params: { stops, mix: 1 } }],
+        gradient: gradientSelection
+      });
     }
   }
   const quality = format === 'image/jpeg' ? getJPEGQuality() : undefined;
