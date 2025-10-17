@@ -573,16 +573,31 @@ function ensureHiddenMediaContainer(){
   if(hiddenMediaContainer && hiddenMediaContainer.isConnected){
     return hiddenMediaContainer;
   }
-  hiddenMediaContainer = document.createElement('div');
-  hiddenMediaContainer.style.position = 'fixed';
-  hiddenMediaContainer.style.inset = '0 auto auto 0';
-  hiddenMediaContainer.style.width = '0';
-  hiddenMediaContainer.style.height = '0';
-  hiddenMediaContainer.style.overflow = 'hidden';
-  hiddenMediaContainer.style.opacity = '0';
-  hiddenMediaContainer.style.pointerEvents = 'none';
-  hiddenMediaContainer.style.zIndex = '-1';
-  document.body.appendChild(hiddenMediaContainer);
+  if(!hiddenMediaContainer){
+    hiddenMediaContainer = document.createElement('div');
+    hiddenMediaContainer.style.position = 'fixed';
+    hiddenMediaContainer.style.inset = '0 auto auto 0';
+    hiddenMediaContainer.style.width = '0';
+    hiddenMediaContainer.style.height = '0';
+    hiddenMediaContainer.style.overflow = 'hidden';
+    hiddenMediaContainer.style.opacity = '0';
+    hiddenMediaContainer.style.pointerEvents = 'none';
+    hiddenMediaContainer.style.zIndex = '-1';
+  }
+  const attach = () => {
+    if(!hiddenMediaContainer || hiddenMediaContainer.isConnected){
+      return;
+    }
+    const parent = document.body || document.documentElement;
+    if(parent){
+      parent.appendChild(hiddenMediaContainer);
+    }
+  };
+  if(document.readyState === 'loading' || !document.body){
+    document.addEventListener('DOMContentLoaded', attach, { once: true });
+  }else{
+    attach();
+  }
   return hiddenMediaContainer;
 }
 
@@ -1393,6 +1408,531 @@ function bindPlaybackControl(){
     }
     drawAnimationFrame(player, player.frameIndex);
   });
+}
+
+function initAdvancedDitherControls(){
+  const panel = $('ditherAdvancedPanel');
+  const container = $('ditherAdvancedControls');
+  if(!panel || !container){
+    return;
+  }
+  container.innerHTML = '';
+  state.advancedDitherSettings = {};
+  state.advancedDitherControls = new Map();
+  for(const def of ADVANCED_DITHER_DEFS){
+    const defaults = cloneAdvancedDefaults(def.defaults || {});
+    state.advancedDitherSettings[def.id] = { params: defaults };
+    const group = document.createElement('div');
+    group.className = 'dither-advanced__group';
+    group.hidden = true;
+    const paramRefs = new Map();
+    for(const param of def.params || []){
+      const field = document.createElement('div');
+      field.className = 'field';
+      const label = document.createElement('label');
+      label.textContent = param.label || param.key;
+      field.appendChild(label);
+      const { input, display } = createAdvancedDitherInput(def, param, defaults[param.key]);
+      if(param.placeholder){
+        input.placeholder = param.placeholder;
+      }
+      field.appendChild(input);
+      if(display){
+        field.appendChild(display);
+      }
+      group.appendChild(field);
+      paramRefs.set(param.key, { input, display, definition: param });
+    }
+    container.appendChild(group);
+    state.advancedDitherControls.set(def.id, { root: group, params: paramRefs });
+  }
+  updateAdvancedDitherVisibility();
+}
+
+function createAdvancedDitherInput(def, param, initialValue){
+  let value = initialValue;
+  if(value === undefined){
+    value = param.type === 'checkbox' ? false : '';
+  }
+  let input;
+  let display = null;
+  if(param.type === 'select'){
+    input = document.createElement('select');
+    for(const option of param.options || []){
+      const opt = document.createElement('option');
+      opt.value = String(option.value);
+      opt.textContent = option.label;
+      input.appendChild(opt);
+    }
+    const fallback = param.options && param.options.length ? param.options[0].value : '';
+    input.value = String(value != null ? value : fallback);
+  }else if(param.type === 'checkbox'){
+    input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = Boolean(value);
+  }else if(param.type === 'range'){
+    input = document.createElement('input');
+    input.type = 'range';
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    const numValue = Number.isFinite(Number(value)) ? Number(value) : Number(param.min || 0);
+    input.value = String(numValue);
+    display = document.createElement('span');
+    display.className = 'range-display';
+    display.textContent = formatAdvancedDisplayValue(param, numValue);
+  }else{
+    input = document.createElement('input');
+    input.type = param.type === 'number' ? 'number' : 'text';
+    if(param.min != null) input.min = String(param.min);
+    if(param.max != null) input.max = String(param.max);
+    if(param.step != null) input.step = String(param.step);
+    let initial = value;
+    if(param.key === 'palette' && Array.isArray(value)){
+      initial = stringifyPalette(value);
+    }else if(param.key === 'angles' && Array.isArray(value)){
+      initial = value.join(',');
+    }
+    input.value = initial != null ? String(initial) : '';
+  }
+  const eventType = param.type === 'checkbox' || param.type === 'select' ? 'change' : 'input';
+  input.addEventListener(eventType, () => handleAdvancedDitherParamChange(def, param, input, display));
+  return { input, display };
+}
+
+function handleAdvancedDitherParamChange(def, param, input, display){
+  const settings = state.advancedDitherSettings[def.id];
+  if(!settings) return;
+  let value;
+  if(param.type === 'checkbox'){
+    value = Boolean(input.checked);
+  }else if(param.type === 'select'){
+    const selected = input.value;
+    const numeric = Number(selected);
+    value = Number.isNaN(numeric) ? selected : numeric;
+  }else if(param.key === 'palette'){
+    value = parsePaletteValue(input.value, def.defaults && def.defaults.palette);
+    input.value = stringifyPalette(value);
+  }else if(param.key === 'angles'){
+    value = parseAnglesValue(input.value, def.defaults && def.defaults.angles);
+    input.value = value.join(',');
+  }else if(param.type === 'range' || param.type === 'number'){
+    const num = Number(input.value);
+    const fallback = Number(param.min || 0);
+    value = Number.isFinite(num) ? num : fallback;
+    input.value = String(value);
+  }else{
+    value = input.value;
+  }
+  settings.params[param.key] = value;
+  if(display){
+    const numeric = Number(value);
+    display.textContent = formatAdvancedDisplayValue(param, Number.isFinite(numeric) ? numeric : Number(input.value));
+  }
+  fastRender(true);
+}
+
+function formatAdvancedDisplayValue(param, value){
+  if(typeof value !== 'number' || Number.isNaN(value)){
+    return '';
+  }
+  const step = typeof param.step === 'number' ? param.step : 0.1;
+  const decimals = step < 1 ? Math.max(0, Math.ceil(Math.abs(Math.log10(step)))) : 0;
+  return value.toFixed(decimals);
+}
+
+function cloneAdvancedDefaults(defaults){
+  if(!defaults) return {};
+  return JSON.parse(JSON.stringify(defaults));
+}
+
+function updateAdvancedDitherVisibility(){
+  const panel = $('ditherAdvancedPanel');
+  const mode = controls.dither ? controls.dither.value : 'none';
+  const def = getAdvancedDitherDefinition(mode);
+  if(!panel){
+    return;
+  }
+  panel.hidden = !def;
+  for(const [id, refs] of state.advancedDitherControls){
+    refs.root.hidden = !def || def.id !== id;
+  }
+  if(def){
+    syncAdvancedDitherControls(def.id);
+  }
+}
+
+function setAdvancedControlsLocked(locked){
+  if(state.advancedControlsLocked === locked){
+    return;
+  }
+  state.advancedControlsLocked = locked;
+  const panel = $('ditherAdvancedPanel');
+  if(panel){
+    if(locked){
+      panel.classList.add('is-locked');
+      panel.setAttribute('aria-disabled','true');
+    }else{
+      panel.classList.remove('is-locked');
+      panel.removeAttribute('aria-disabled');
+    }
+  }
+  for(const refs of state.advancedDitherControls.values()){
+    for(const ref of refs.params.values()){
+      if(!ref || !ref.input) continue;
+      ref.input.disabled = locked;
+      if(locked){
+        ref.input.setAttribute('aria-disabled','true');
+      }else{
+        ref.input.removeAttribute('aria-disabled');
+      }
+    }
+  }
+}
+
+function syncAdvancedDitherControls(id){
+  const refs = state.advancedDitherControls.get(id);
+  const settings = state.advancedDitherSettings[id];
+  if(!refs || !settings) return;
+  for(const [key, ref] of refs.params){
+    const paramDef = ref.definition;
+    const value = settings.params[key];
+    if(paramDef.type === 'checkbox'){
+      ref.input.checked = Boolean(value);
+    }else if(paramDef.type === 'select'){
+      ref.input.value = String(value);
+    }else if(paramDef.key === 'palette'){
+      ref.input.value = stringifyPalette(value);
+    }else if(paramDef.key === 'angles'){
+      ref.input.value = Array.isArray(value) ? value.join(',') : '';
+    }else{
+      ref.input.value = value != null ? String(value) : '';
+    }
+    if(ref.display){
+      const numeric = Number(ref.input.value);
+      ref.display.textContent = formatAdvancedDisplayValue(paramDef, Number.isFinite(numeric) ? numeric : 0);
+    }
+  }
+}
+
+function getAdvancedDitherDefinition(id){
+  return ADVANCED_DITHER_DEFS.find((def) => def.id === id);
+}
+
+function prepareAdvancedDitherParams(def, params){
+  const output = {};
+  for(const param of def.params || []){
+    const value = params[param.key];
+    if(param.type === 'checkbox'){
+      output[param.key] = Boolean(value);
+    }else if(param.key === 'palette'){
+      output[param.key] = parsePaletteValue(value, def.defaults && def.defaults.palette);
+    }else if(param.key === 'angles'){
+      output[param.key] = parseAnglesValue(value, def.defaults && def.defaults.angles);
+    }else if(param.type === 'range' || param.type === 'number'){
+      const num = Number(value);
+      output[param.key] = Number.isFinite(num) ? num : Number(param.min || 0);
+    }else if(param.type === 'select'){
+      if(typeof value === 'string'){
+        const numeric = Number(value);
+        output[param.key] = Number.isNaN(numeric) ? value : numeric;
+      }else{
+        output[param.key] = value;
+      }
+    }else{
+      output[param.key] = value;
+    }
+  }
+  return output;
+}
+
+function buildAdvancedDitherChain(){
+  const mode = controls.dither ? controls.dither.value : 'none';
+  const def = getAdvancedDitherDefinition(mode);
+  const base = collectRenderOptions();
+  const gradientId = base.gradientMap;
+  const gradientStops = gradientId && gradientId !== 'none'
+    ? getGradientStopsById(gradientId)
+    : null;
+  const chain = [];
+  if(def){
+    const settings = state.advancedDitherSettings[def.id];
+    if(settings){
+      const params = prepareAdvancedDitherParams(def, settings.params);
+      const globals = {
+        pixelSize: base.px,
+        threshold: base.thr,
+        blur: base.blurPx,
+        grain: base.grain,
+        blackPoint: base.bp,
+        whitePoint: base.wp,
+        gamma: base.gam,
+        brightness: base.bri,
+        contrast: base.con,
+        invertMode: base.invertMode,
+        background: base.bg,
+        foreground: base.fg
+      };
+      chain.push({ name: def.id, params: { ...params, _globals: globals } });
+    }
+  }
+  if(gradientStops && gradientStops.length >= 2){
+    const hasGradient = chain.some((fx) => fx && fx.name === 'gradientMap');
+    if(!hasGradient){
+      chain.push({ name: 'gradientMap', params: { stops: gradientStops, mix: 1 } });
+    }
+  }
+  return chain;
+}
+
+async function applyAdvancedDitherToCanvas(canvas, { preview = false, token = null, effects = null, maxPreviewDimension = ADVANCED_PREVIEW_MAX_DIMENSION, gradient = null } = {}){
+  if(!canvas) return;
+  const chain = effects && effects.length ? effects : buildAdvancedDitherChain();
+  const hasGradientEffect = chain.some((fx) => fx && fx.name === 'gradientMap');
+  const targetGradientStops = gradient && gradient !== 'none' ? getGradientStopsById(gradient) : null;
+  const gradientEffectMatches = hasGradientEffect && targetGradientStops
+    ? chain.some((fx) => fx && fx.name === 'gradientMap' && Array.isArray(fx.params && fx.params.stops) && stopsMatch(fx.params.stops, targetGradientStops))
+    : false;
+  if(!chain.length) return;
+  try{
+    const shouldAbort = token == null
+      ? undefined
+      : () => state.advancedDitherPreviewTokens.get(canvas) !== token;
+    await applyToCanvas(canvas, chain, {
+      preview,
+      maxDimension: preview ? maxPreviewDimension : undefined,
+      shouldAbort
+    });
+    if(typeof shouldAbort === 'function' && shouldAbort()){
+      return;
+    }
+    if(gradient && gradient !== 'none' && !gradientEffectMatches){
+      const ctx = canvas.getContext('2d');
+      if(ctx){
+        applyGradientOverlay(ctx, gradient, canvas.width, canvas.height);
+      }
+    }
+  }catch(err){
+    console.warn('[dither] applicazione avanzata fallita', err);
+  }
+}
+
+function scheduleAdvancedDitherPreview(canvas){
+  state.advancedDitherActiveCanvas = canvas || null;
+  const effects = buildAdvancedDitherChain();
+  if(!effects.length || !canvas){
+    if(canvas){
+      state.advancedDitherPreviewTokens.delete(canvas);
+    }
+    return;
+  }
+  const token = ++state.advancedDitherJobCounter;
+  state.advancedDitherPreviewTokens.set(canvas, token);
+  requestAnimationFrame(() => {
+    if(state.advancedDitherActiveCanvas !== canvas) return;
+    if(state.advancedDitherPreviewTokens.get(canvas) !== token) return;
+    applyAdvancedDitherToCanvas(canvas, {
+      preview: true,
+      token,
+      maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION,
+      gradient: getSelectedGradient()
+    });
+  });
+}
+
+function clearAdvancedDitherPreview(canvas){
+  if(!canvas) return;
+  state.advancedDitherPreviewTokens.delete(canvas);
+  if(state.advancedDitherActiveCanvas === canvas){
+    state.advancedDitherActiveCanvas = null;
+  }
+}
+
+function isAdvancedDitherMode(mode){
+  return Boolean(getAdvancedDitherDefinition(mode));
+}
+
+function isCpuOnlyAdvancedDither(mode){
+  return CPU_ONLY_ADVANCED_DITHERS.has(mode);
+}
+
+function isCpuVideoPreview(player){
+  if(state.sourceKind !== 'video' || !player){
+    return false;
+  }
+  const mode = controls.dither ? controls.dither.value : 'none';
+  return player.disableAdvancedPreview && isCpuOnlyAdvancedDither(mode);
+}
+
+function ensureCpuVideoHelper(width, height){
+  if(!cpuVideoHelperCanvas){
+    cpuVideoHelperCanvas = document.createElement('canvas');
+  }
+  if(cpuVideoHelperCanvas.width !== width || cpuVideoHelperCanvas.height !== height){
+    cpuVideoHelperCanvas.width = width;
+    cpuVideoHelperCanvas.height = height;
+    cpuVideoHelperCtx = null;
+  }
+  if(!cpuVideoHelperCtx){
+    cpuVideoHelperCtx = cpuVideoHelperCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  return cpuVideoHelperCtx ? { canvas: cpuVideoHelperCanvas, ctx: cpuVideoHelperCtx } : null;
+}
+
+function getVideoFrameTime(player, index){
+  if(!player) return 0;
+  if(Array.isArray(player.frameTimes) && player.frameTimes.length){
+    const clamped = Math.max(0, Math.min(index, player.frameTimes.length - 1));
+    return player.frameTimes[clamped];
+  }
+  const durations = Array.isArray(player.data && player.data.durations) ? player.data.durations : [];
+  if(!durations.length){
+    return 0;
+  }
+  let total = 0;
+  const limit = Math.max(0, Math.min(index, durations.length - 1));
+  for(let i=0;i<limit;i++){
+    total += Math.max(0, durations[i] || 0);
+  }
+  return total / 1000;
+}
+
+async function scheduleCpuVideoPreview(player, index){
+  if(!player || !player.canvas) return;
+  const effects = buildAdvancedDitherChain();
+  const hasGradientEffect = effects.some((fx) => fx && fx.name === 'gradientMap');
+  if(!effects.length){
+    return;
+  }
+  const canvas = player.canvas;
+  state.advancedDitherActiveCanvas = canvas;
+  const token = ++state.advancedDitherJobCounter;
+  state.advancedDitherPreviewTokens.set(canvas, token);
+  const videoEl = player.videoEl;
+  const frame = player.data && Array.isArray(player.data.frames) ? player.data.frames[index] : null;
+  try{
+    if(videoEl){
+      const targetTime = getVideoFrameTime(player, index);
+      if(Number.isFinite(targetTime)){
+        try{
+          const delta = Math.abs((videoEl.currentTime || 0) - targetTime);
+          if(delta > 0.0005){
+            await seekVideo(videoEl, targetTime);
+          }
+        }catch(err){
+          console.warn('[video] seek failed', err);
+        }
+      }
+      const imageData = await captureVideoFrameImageData(videoEl, 3000);
+      if(state.advancedDitherPreviewTokens.get(canvas) !== token){
+        return;
+      }
+      const processed = await runPostEffects(imageData, effects, { preview: true });
+      if(state.advancedDitherPreviewTokens.get(canvas) !== token){
+        return;
+      }
+      const helper = ensureCpuVideoHelper(processed.width, processed.height);
+      if(helper && helper.ctx){
+        helper.ctx.putImageData(processed, 0, 0);
+        const ctx = player.ctx;
+        if(ctx){
+          ctx.save();
+          try{
+            if(typeof ctx.resetTransform === 'function'){
+              ctx.resetTransform();
+            }else{
+              ctx.setTransform(1,0,0,1,0,0);
+            }
+            if(player.dpr && player.dpr !== 1){
+              ctx.scale(player.dpr, player.dpr);
+            }
+            ctx.imageSmoothingEnabled = false;
+            const bg = player.data && player.data.bg;
+            if(bg && bg !== 'transparent'){
+              ctx.fillStyle = bg;
+              ctx.fillRect(0, 0, player.width, player.height);
+            }else{
+              ctx.clearRect(0, 0, player.width, player.height);
+            }
+            ctx.drawImage(helper.canvas, 0, 0, player.width, player.height);
+            const gradientKey = (frame && frame.gradient) || player.data.gradient || state.gradientMap || 'none';
+            const frameStops = gradientKey && gradientKey !== 'none' ? getGradientStopsById(gradientKey) : null;
+            const gradientEffectMatches = hasGradientEffect && frameStops
+              ? effects.some((fx) => fx && fx.name === 'gradientMap' && Array.isArray(fx.params && fx.params.stops) && stopsMatch(fx.params.stops, frameStops))
+              : false;
+            if(gradientKey && gradientKey !== 'none' && !gradientEffectMatches){
+              applyGradientOverlay(ctx, gradientKey, player.width, player.height);
+            }
+          }finally{
+            ctx.restore();
+          }
+        }
+      }
+    }else{
+      await applyAdvancedDitherToCanvas(canvas, {
+        preview: true,
+        token,
+        maxPreviewDimension: ADVANCED_PREVIEW_MAX_DIMENSION,
+        gradient: getSelectedGradient()
+      });
+    }
+  }catch(err){
+    console.warn('[video] advanced preview failed', err);
+  }finally{
+    if(state.advancedDitherPreviewTokens.get(canvas) === token){
+      state.advancedDitherPreviewTokens.delete(canvas);
+    }
+  }
+}
+
+function parsePaletteValue(value, fallback){
+  if(Array.isArray(value)){
+    return value;
+  }
+  if(typeof value !== 'string'){
+    return Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]];
+  }
+  const parts = value.split(/[;,\s]+/).map((part) => part.trim()).filter(Boolean);
+  if(!parts.length){
+    return Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]];
+  }
+  const palette = [];
+  for(const part of parts){
+    const hex = part.replace('#','');
+    if(hex.length === 6){
+      const r = parseInt(hex.slice(0,2), 16);
+      const g = parseInt(hex.slice(2,4), 16);
+      const b = parseInt(hex.slice(4,6), 16);
+      if(Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)){
+        palette.push([r, g, b]);
+      }
+    }
+  }
+  return palette.length ? palette : (Array.isArray(fallback) && fallback.length ? fallback : [[0,0,0],[255,255,255]]);
+}
+
+function stringifyPalette(palette){
+  if(!Array.isArray(palette)) return '';
+  return palette.map((color) => {
+    if(!Array.isArray(color) || color.length < 3) return '#000000';
+    const [r, g, b] = color;
+    const toHex = (val) => {
+      const clamped = Math.max(0, Math.min(255, Math.round(val || 0)));
+      return clamped.toString(16).padStart(2, '0');
+    };
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }).join(',');
+}
+
+function parseAnglesValue(value, fallback){
+  if(Array.isArray(value)){
+    return value;
+  }
+  if(typeof value !== 'string'){
+    return Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135];
+  }
+  const parts = value.split(/[;,]+/).map((part) => Number(part.trim())).filter((num) => Number.isFinite(num));
+  return parts.length ? parts : (Array.isArray(fallback) && fallback.length ? fallback : [0,45,90,135]);
 }
 
 function initAdvancedDitherControls(){
@@ -3118,7 +3658,9 @@ function collectRenderOptions(){
 }
 
 function buildWorkerOptions(options){
-  const advanced = isAdvancedDitherMode(options.mode);
+  const advancedMode = isAdvancedDitherMode(options.mode);
+  const gradientActive = options.gradientMap && options.gradientMap !== 'none';
+  const requiresAdvancedBase = advancedMode || gradientActive;
   return {
     pixelSize: options.px,
     threshold: options.thr,
@@ -3131,13 +3673,13 @@ function buildWorkerOptions(options){
     contrast: options.con,
     style: options.style,
     thickness: options.thick,
-    dither: advanced ? 'advanced_base' : options.mode,
+    dither: requiresAdvancedBase ? 'advanced_base' : options.mode,
     invertMode: options.invertMode,
     asciiCustom: options.asciiCustom,
     asciiWord: options.asciiWord,
     mode: options.mode,
     gradientMap: options.gradientMap,
-    advanced
+    advanced: advancedMode
   };
 }
 
@@ -4384,6 +4926,41 @@ function paintFrame(ctx, data, outWidth, outHeight){
   if(gradientKey && gradientKey !== 'none' && type !== 'advanced-base'){
     applyGradientOverlay(ctx, gradientKey, outWidth, outHeight);
   }
+}
+
+function paintBitmapFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  const bg = data.bg;
+  if(bg && bg !== 'transparent'){
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+  }else{
+    ctx.clearRect(0, 0, outWidth, outHeight);
+  }
+  const source = data.bitmap || data.image || data.canvas;
+  if(source){
+    ctx.drawImage(source, 0, 0, outWidth, outHeight);
+  }
+  ctx.restore();
+}
+
+function paintImageDataFrame(ctx, data, outWidth, outHeight){
+  if(!ctx || !data || !data.imageData) return;
+  const imageData = data.imageData;
+  const width = imageData.width;
+  const height = imageData.height;
+  if(!width || !height) return;
+  if(!imageFrameCanvas || imageFrameCanvas.width !== width || imageFrameCanvas.height !== height){
+    imageFrameCanvas = document.createElement('canvas');
+    imageFrameCanvas.width = width;
+    imageFrameCanvas.height = height;
+    imageFrameCtx = imageFrameCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if(!imageFrameCtx) return;
+  imageFrameCtx.putImageData(imageData, 0, 0);
+  paintBitmapFrame(ctx, { ...data, bitmap: imageFrameCanvas }, outWidth, outHeight);
 }
 
 function paintBitmapFrame(ctx, data, outWidth, outHeight){
